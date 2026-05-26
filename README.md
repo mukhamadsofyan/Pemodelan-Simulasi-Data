@@ -24,7 +24,7 @@ Cocok digunakan untuk penelitian, tugas akhir, atau analisis kebijakan layanan k
 | 💾 **Export** | Download hasil simulasi sebagai CSV dan PDF |
 | 🤖 **AI Recommendation** | Rekomendasi otomatis jumlah konselor optimal |
 | 🔐 **Login System** | Autentikasi sederhana sebelum akses dashboard |
-| 👥 **Support 2.000 Siswa** | Optimasi performa menggunakan NumPy vectorized operations |
+| 👥 **Support 5.000 Siswa** | Optimasi performa menggunakan NumPy vectorized operations |
 
 ---
 
@@ -61,7 +61,7 @@ Buka browser dan akses: **http://localhost:8501**
 | Field | Value |
 |---|---|
 | Username | `admin` |
-| Password | `12345` |
+| Password | `123456` |
 
 ---
 

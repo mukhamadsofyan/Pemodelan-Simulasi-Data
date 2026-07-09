@@ -19,7 +19,7 @@ def apply_style():
 
     st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght=0,400;0,600;0,700;1,400&family=Source+Serif+4:wght@300;400;600&family=IBM+Plex+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght=0,400;0,600;0,700;1,400&family=Source+Serif+4:wght@300;400;600&family=IBM+Plex+Mono:wght=400;500;600&family=Outfit:wght@300;400;500;600&display=swap');
 
     /* ─── Reset & Root ─── */
     *, *::before, *::after { box-sizing: border-box; }
@@ -89,6 +89,48 @@ def apply_style():
     [data-testid="stSidebar"] * {
         color: var(--cloud) !important;
     }
+    
+    /* FIX: Paksa teks di dalam input angka/seed tetap gelap dan terbaca */
+    [data-testid="stSidebar"] input[type="number"] {
+        color: var(--ink) !important;
+        background-color: var(--white) !important;
+    }
+    
+    /* FIX: Paksa tombol pengubah nilai (+ / -) pada number input tetap terlihat gelap */
+    [data-testid="stSidebar"] button[data-testid="stNumberInputStepUp"],
+    [data-testid="stSidebar"] button[data-testid="stNumberInputStepDown"] {
+        color: var(--ink-2) !important;
+    }
+
+    /* FIX: Teks uploader dataset dibuat putih agar senada dengan sidebar gelap */
+    [data-testid="stSidebar"] [data-testid="stFileUploader"] * {
+        color: var(--cloud) !important;
+    }
+
+    /* FIX: Area drag-and-drop file uploader tetap gelap dengan teks putih */
+    [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
+        background-color: rgba(255, 255, 255, 0.06) !important;
+        border: 1px dashed var(--slate-2) !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] * {
+        color: var(--cloud) !important;
+    }
+
+    /* FIX: Tombol "Browse files" pada uploader tetap terbaca */
+    [data-testid="stSidebar"] [data-testid="stFileUploader"] button {
+        color: var(--ink) !important;
+        background-color: var(--white) !important;
+        border: 1px solid var(--slate-2) !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stFileUploader"] button * {
+        color: var(--ink) !important;
+    }
+
+    /* FIX: Nama file yang sudah diunggah beserta ukurannya */
+    [data-testid="stSidebar"] [data-testid="stFileUploaderFile"] * {
+        color: var(--cloud) !important;
+    }
+
     [data-testid="stSidebar"] .stSlider > div > div {
         background: var(--ink-3) !important;
     }
@@ -231,10 +273,6 @@ def apply_style():
     /* ─── Spinner ─── */
     .stSpinner > div { border-top-color: var(--azure) !important; }
 
-    /* ══════════════════════════════════════
-       CUSTOM COMPONENTS
-     ══════════════════════════════════════ */
-
     /* Masthead */
     .masthead {
         background: var(--ink);
@@ -339,15 +377,6 @@ def apply_style():
         gap: .5rem;
         flex-wrap: wrap;
     }
-    .hero-tag {
-        font-family: var(--ff-mono);
-        font-size: .65rem;
-        font-weight: 500;
-        padding: .3rem .65rem;
-        border-radius: 3px;
-        text-transform: uppercase;
-        letter-spacing: .07em;
-    }
     .hero-tag.blue   { background: rgba(59,125,216,.1);  color: var(--royal-2); border: 1px solid rgba(59,125,216,.2); }
     .hero-tag.teal   { background: rgba(13,115,119,.1);  color: var(--teal);    border: 1px solid rgba(13,115,119,.2); }
     .hero-tag.amber  { background: rgba(212,160,23,.1);  color: var(--gold);    border: 1px solid rgba(212,160,23,.2); }
@@ -406,7 +435,6 @@ def apply_style():
     .kpi-card.crimson::after{ background: linear-gradient(90deg, var(--crimson), var(--blush)); }
     .kpi-card.emerald::after{ background: linear-gradient(90deg, var(--emerald), var(--sage)); }
 
-    /* Text Formatting */
     .kpi-label {
         font-family: var(--ff-ui);
         font-size: .67rem;
@@ -560,7 +588,7 @@ def apply_style():
         background: linear-gradient(135deg, var(--royal-2), var(--azure));
         border-radius: var(--radius);
         display: flex; align-items: center; justify-content: center;
-        font-size: 1.2rem;
+        font-size: 1rem;
         flex-shrink: 0;
     }
     .sb-logo-text { font-family: var(--ff-display); font-size: 1.1rem; color: #fff; font-weight: 700; }
@@ -664,7 +692,6 @@ def apply_style():
     .footer-strip strong { color: var(--fog); }
     </style>
     """, unsafe_allow_html=True)
-
 
 # ============================================================
 # sim_engine.py
@@ -1426,11 +1453,13 @@ st.set_page_config(
 apply_style()
 
 # ══════════════════════════════════════════════
-# LOGIN
+# LOGIN (persisten lewat query param, tidak reset saat refresh)
 # ══════════════════════════════════════════════
 
 if "login" not in st.session_state:
-    st.session_state.login = False
+    # Saat pertama kali app dimuat (termasuk setelah refresh browser),
+    # cek apakah ada penanda auth di URL. Jika ada, anggap masih login.
+    st.session_state.login = st.query_params.get("auth") == "1"
 
 if not st.session_state.login:
     st.markdown("""
@@ -1448,6 +1477,8 @@ if not st.session_state.login:
         if st.button("Masuk →", use_container_width=True):
             if username.lower() == "admin" and password == "123456":
                 st.session_state.login = True
+                # Tulis penanda auth ke query param URL agar bertahan saat refresh
+                st.query_params["auth"] = "1"
                 st.rerun()
             else:
                 st.error("Nama pengguna atau kata sandi salah.")
@@ -1496,7 +1527,7 @@ with st.sidebar:
     if use_seed:
         seed_value = st.number_input("Seed", min_value=0, max_value=999999, value=42, step=1)
 
-    st.markdown('<div class="div-label">Dataset</div>', unsafe_allow_html=True)
+    st.markdown('<div class="div-label">Unggah Dataset</div>', unsafe_allow_html=True)
     uploaded_file = st.file_uploader(
         "Unggah Dataset CSV",
         type=["csv"],
@@ -1510,6 +1541,9 @@ with st.sidebar:
     if st.button("Keluar", use_container_width=True):
         st.session_state.login = False
         st.session_state.sim_data = None
+        # Hapus penanda auth dari URL supaya benar-benar logout
+        if "auth" in st.query_params:
+            del st.query_params["auth"]
         st.rerun()
 
 # ══════════════════════════════════════════════

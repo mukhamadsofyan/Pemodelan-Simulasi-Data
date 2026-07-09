@@ -7,22 +7,6 @@ untuk Analisis Waktu Tunggu dan Efisiensi Sistem.
 Login demo:
 - Username: admin
 - Password: 123456
-
-Pembaruan pada revisi ini:
-1. Bug download yang membuat dashboard "keluar" ke halaman kosong sudah
-   diperbaiki (hasil disimpan di st.session_state).
-2. Interarrival time mahasiswa kini memakai distribusi EKSPONENSIAL
-   (proses Poisson), bukan uniform -- konsisten dengan asumsi model
-   antrian M/M/c, dan mendukung random seed agar dapat direproduksi.
-3. Monte Carlo diperkaya dengan interval kepercayaan 95%, persentil,
-   probabilitas melebihi ambang batas, skewness, dan grafik konvergensi.
-4. Validasi model teoritis M/M/c (Erlang-C) terhadap hasil simulasi ABM.
-5. Perbaikan bug PDF: fpdf2 versi baru mengembalikan bytearray, dikonversi
-   eksplisit ke bytes agar kompatibel dengan st.download_button.
-
-Catatan: fitur "Priority Queue / Metode Antrian" dan "Optimasi Jumlah
-Konselor" (grid search biaya + uji hipotesis) telah DIHAPUS sesuai
-permintaan -- antrian kembali murni FIFO berdasarkan urutan kedatangan.
 """
 
 
@@ -35,7 +19,7 @@ def apply_style():
 
     st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=Source+Serif+4:wght@300;400;600&family=IBM+Plex+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght=0,400;0,600;0,700;1,400&family=Source+Serif+4:wght@300;400;600&family=IBM+Plex+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600&display=swap');
 
     /* ─── Reset & Root ─── */
     *, *::before, *::after { box-sizing: border-box; }
@@ -249,7 +233,7 @@ def apply_style():
 
     /* ══════════════════════════════════════
        CUSTOM COMPONENTS
-    ══════════════════════════════════════ */
+     ══════════════════════════════════════ */
 
     /* Masthead */
     .masthead {
@@ -422,6 +406,7 @@ def apply_style():
     .kpi-card.crimson::after{ background: linear-gradient(90deg, var(--crimson), var(--blush)); }
     .kpi-card.emerald::after{ background: linear-gradient(90deg, var(--emerald), var(--sage)); }
 
+    /* Text Formatting */
     .kpi-label {
         font-family: var(--ff-ui);
         font-size: .67rem;
@@ -575,7 +560,7 @@ def apply_style():
         background: linear-gradient(135deg, var(--royal-2), var(--azure));
         border-radius: var(--radius);
         display: flex; align-items: center; justify-content: center;
-        font-size: 1rem;
+        font-size: 1.2rem;
         flex-shrink: 0;
     }
     .sb-logo-text { font-family: var(--ff-display); font-size: 1.1rem; color: #fff; font-weight: 700; }
@@ -1014,20 +999,6 @@ def erlang_c_waiting_time(mean_interarrival, mean_service, c):
     Menghitung ekspektasi waktu tunggu teoritis (Wq) menggunakan
     formula Erlang C untuk model antrian M/M/c, sebagai pembanding
     /validasi terhadap hasil rata-rata waktu tunggu simulasi ABM.
-
-    Parameter
-    ---------
-    mean_interarrival : rata-rata waktu antar kedatangan (menit)
-    mean_service       : rata-rata waktu layanan per mahasiswa (menit)
-    c                   : jumlah konselor (server)
-
-    Return
-    ------
-    (wq_teoritis, rho, is_stable)
-        wq_teoritis : ekspektasi waktu tunggu teoritis (menit), atau
-                      None jika sistem tidak stabil (rho >= 1)
-        rho         : tingkat utilisasi sistem (0-1, atau >1 jika overload)
-        is_stable   : True jika rho < 1 (sistem tidak akan "meledak")
     """
     if mean_interarrival <= 0 or mean_service <= 0 or c <= 0:
         return None, None, False
@@ -1187,7 +1158,7 @@ def try_fpdf(summary_df, avg_waiting, counselors, probability_wait):
             msg = (
                 f"Sistem berada pada beban sedang. Rata-rata waktu tunggu adalah "
                 f"{avg_waiting} menit dengan probabilitas menunggu {probability_wait:.1%}. "
-                "Jumlah konselor saat ini masih dapat digunakan, tetapi perlu dipantau saat jam sibuk."
+                f"Jumlah konselor saat ini masih dapat digunakan, tetapi perlu dipantau saat jam sibuk."
             )
 
         pdf.multi_cell(0, 6.5, _safe(msg))
@@ -1208,8 +1179,6 @@ def try_fpdf(summary_df, avg_waiting, counselors, probability_wait):
             raw = pdf.output(dest="S")
             if isinstance(raw, str):
                 return raw.encode("latin-1"), "pdf"
-            # fpdf2 versi baru mengembalikan bytearray, bukan bytes --
-            # st.download_button hanya menerima bytes/str, jadi dikonversi eksplisit.
             return bytes(raw), "pdf"
         except Exception:
             buf = io.BytesIO()
@@ -1224,10 +1193,6 @@ def try_fpdf(summary_df, avg_waiting, counselors, probability_wait):
 # svg_charts.py
 # ============================================================
 import numpy as np
-
-# ══════════════════════════════════════════════
-# SVG CHARTS — zero external dependencies
-# ══════════════════════════════════════════════
 
 def _grid_y(pad, W, H, vmin, vmax, n=5, fmt=".2f"):
     out = ""
@@ -1365,12 +1330,6 @@ def make_svg_hist(values, bins=25, color="#1a3a6b", mean_color="#b8860b",
 def make_svg_single_line(x_vals, y_vals, label, color="#1a3a6b",
                          band_lo=None, band_hi=None, ref_val=None, ref_label="",
                          width=600, height=260):
-    """
-    Grafik satu garis -- dipakai untuk analisis konvergensi Monte Carlo
-    (running mean terhadap jumlah iterasi). Bisa ditambahkan pita
-    (band_lo/band_hi, misal interval kepercayaan) dan garis referensi
-    horizontal (ref_val, misal nilai teoritis Erlang-C untuk validasi).
-    """
     n = len(x_vals)
     if n == 0: return ""
     pad  = dict(l=52, r=20, t=36, b=40)
@@ -1424,66 +1383,9 @@ def make_svg_single_line(x_vals, y_vals, label, color="#1a3a6b",
             + grid + band + line + ref_line + xlabels + legend + '</svg>')
 
 
-def make_svg_box(labels, data_lists, color="#1a3a6b", width=600, height=280):
-    """
-    Boxplot sederhana -- dipakai untuk membandingkan distribusi hasil
-    Monte Carlo antar skenario (misal: beberapa jumlah konselor sekaligus).
-    """
-    n = len(labels)
-    if n == 0: return ""
-    pad  = dict(l=52, r=20, t=36, b=40)
-    W    = width - pad["l"] - pad["r"]
-    H    = height - pad["t"] - pad["b"]
-
-    stats = []
-    all_vals = []
-    for vals in data_lists:
-        v = np.asarray(vals, dtype=float)
-        q1, med, q3 = np.percentile(v, [25, 50, 75])
-        lo, hi = float(np.min(v)), float(np.max(v))
-        stats.append((lo, q1, med, q3, hi))
-        all_vals += [lo, hi]
-
-    vmax = max(all_vals) if all_vals else 1.0
-    vmin = min(0.0, min(all_vals) if all_vals else 0.0)
-
-    grid = _grid_y(pad, W, H, vmin, vmax, fmt=".1f")
-
-    gap = W / n
-    box_w = max(10.0, gap * 0.42)
-
-    def py(v): return pad["t"] + H - ((v - vmin) / max(vmax - vmin, 1e-9)) * H
-
-    elems = ""
-    for i, (lo, q1, med, q3, hi) in enumerate(stats):
-        cx = pad["l"] + i * gap + gap / 2
-        x0 = cx - box_w / 2
-
-        elems += (f'<line x1="{cx:.1f}" y1="{py(lo):.1f}" x2="{cx:.1f}" y2="{py(hi):.1f}"'
-                  f' stroke="{color}" stroke-width="1.4"/>')
-        elems += (f'<rect x="{x0:.1f}" y="{py(q3):.1f}" width="{box_w:.1f}"'
-                  f' height="{max(1.0, py(q1)-py(q3)):.1f}" fill="{color}" opacity="0.30"'
-                  f' stroke="{color}" stroke-width="1.2" rx="2"/>')
-        elems += (f'<line x1="{x0:.1f}" y1="{py(med):.1f}" x2="{x0+box_w:.1f}" y2="{py(med):.1f}"'
-                  f' stroke="{color}" stroke-width="2.2"/>')
-        elems += (f'<text x="{cx:.1f}" y="{pad["t"]+H+16}" fill="#8fa3b8" font-size="9"'
-                  f' text-anchor="middle" font-family="IBM Plex Mono,monospace">{labels[i]}</text>')
-
-    return (f'<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg"'
-            f' style="width:100%;height:auto;display:block;">'
-            f'<rect width="{width}" height="{height}" fill="#fafcfe" rx="8"/>'
-            + grid + elems + '</svg>')
-
-
 # ============================================================
 # ui_helpers.py
 # ============================================================
-import streamlit as st
-
-# ══════════════════════════════════════════════
-# UI HELPERS
-# ══════════════════════════════════════════════
-
 def kpi(label, value, unit="", color="royal", icon=""):
     return (f'<div class="kpi-card {color}">'
             f'<div class="kpi-icon">{icon}</div>'
@@ -1511,13 +1413,8 @@ def chart(title, sub, svg):
 # ============================================================
 # app.py - APLIKASI UTAMA
 # ============================================================
-import streamlit as st
-import pandas as pd
-import numpy as np
-from datetime import datetime
 from scipy import stats
 import time
-
 
 st.set_page_config(
     page_title="Simulasi Antrian Konseling Mahasiswa",
@@ -1563,8 +1460,7 @@ if not st.session_state.login:
     st.stop()
 
 # ══════════════════════════════════════════════
-# STATE HASIL SIMULASI (agar tidak hilang saat rerun,
-# misalnya saat tombol download diklik)
+# STATE HASIL SIMULASI
 # ══════════════════════════════════════════════
 
 if "sim_data" not in st.session_state:
@@ -1655,12 +1551,8 @@ st.markdown("""
 </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════
-# TENTUKAN APAKAH SIMULASI PERLU DIJALANKAN ULANG
+# DETEKSI TRIGGER SIMULASI
 # ══════════════════════════════════════════════
-# generate_button hanya True pada run tempat tombol diklik.
-# uploaded_file tetap ada di session Streamlit selama file belum dihapus,
-# jadi dipakai kunci (nama+ukuran) untuk mendeteksi file BARU saja —
-# supaya rerun akibat klik unduh tidak memicu simulasi ulang.
 
 upload_key = None
 if uploaded_file is not None:
@@ -1670,11 +1562,10 @@ is_new_upload = upload_key is not None and upload_key != st.session_state.last_u
 run_trigger = generate_button or is_new_upload
 
 # ══════════════════════════════════════════════
-# JALANKAN SIMULASI (hanya saat tombol diklik / file baru diunggah)
+# JALANKAN SIMULASI
 # ══════════════════════════════════════════════
 
 if run_trigger:
-
     base_seed = int(seed_value) if use_seed else None
 
     # Dataset
@@ -1760,9 +1651,6 @@ if run_trigger:
             "Efektivitas CBT",
             "Metode Simulasi",
         ],
-        # Dicetak sebagai string (bukan number) karena kolom ini berisi
-        # campuran angka dan teks (mis. "Metode Simulasi") -- tipe campuran
-        # membuat Streamlit/Arrow memicu peringatan konversi saat ditampilkan.
         "Nilai": [
             str(n_students),
             str(counselors),
@@ -1781,10 +1669,7 @@ if run_trigger:
         ]
     })
 
-    # ─────────────────────────────────────────
-    # Monte Carlo: kumpulkan hasil + informasi tambahan
-    # untuk analisis konvergensi & interval kepercayaan
-    # ─────────────────────────────────────────
+    # Monte Carlo
     mc_n = min(n_students, 200)
     with st.spinner(f"Menjalankan {monte_carlo_runs} iterasi Monte Carlo..."):
         mc_rows = []
@@ -1805,15 +1690,12 @@ if run_trigger:
 
     mc_df = pd.DataFrame(mc_rows)
 
-    # ─────────────────────────────────────────
     # Validasi teoritis M/M/c (Erlang-C)
-    # ─────────────────────────────────────────
     wq_theory, rho_theory, is_stable = erlang_c_waiting_time(
         mean_interarrival=mean_interarrival, mean_service=avg_service, c=counselors
     )
 
-    # Simpan SEMUA hasil ke session_state agar tetap tampil
-    # walaupun terjadi rerun (misalnya akibat klik tombol download)
+    # Simpan hasil ke session_state
     st.session_state.sim_data = {
         "dataset": dataset,
         "result": result,
@@ -1841,9 +1723,7 @@ if run_trigger:
     }
 
 # ══════════════════════════════════════════════
-# TAMPILKAN HASIL (dari session_state, bukan dari
-# variabel lokal) — sehingga tombol download / interaksi
-# lain yang memicu rerun TIDAK membuang hasil simulasi
+# TAMPILKAN HASIL (DARI STATE)
 # ══════════════════════════════════════════════
 
 if st.session_state.sim_data is not None:
@@ -2012,9 +1892,7 @@ if st.session_state.sim_data is not None:
             key="dl_pdf"
         )
 
-    # ─────────────────────────────────────────
-    # Monte Carlo
-    # ─────────────────────────────────────────
+    # Monte Carlo Analysis
     sec(6, "Analisis Monte Carlo")
 
     if n_students > 200:
@@ -2058,7 +1936,7 @@ if st.session_state.sim_data is not None:
             make_svg_hist(wt_vals, bins=20, color="#1a3a6b", mean_color="#b8860b")
         )
 
-    # Analisis konvergensi: running mean + pita CI ekspanding
+    # Analisis konvergensi
     running_mean = pd.Series(wt_vals).expanding().mean()
     running_std = pd.Series(wt_vals).expanding().std().fillna(0)
     running_n = np.arange(1, len(wt_vals) + 1)
@@ -2092,9 +1970,7 @@ if st.session_state.sim_data is not None:
         )
     )
 
-    # ─────────────────────────────────────────
     # Validasi teoritis M/M/c (Erlang-C)
-    # ─────────────────────────────────────────
     sec(7, "Validasi Model Teoritis (M/M/c — Erlang-C)")
 
     st.markdown(
@@ -2134,7 +2010,7 @@ if st.session_state.sim_data is not None:
     if avg_waiting > 20 or probability_wait > 0.60:
         sc, ico, head = "warn", "⚠️", "Sistem Antrian Padat"
         body = (
-            f"Rata-rata waktu tunggu mencapai <strong>{avg_waiting} menit</strong> dan "
+            f"Rata-rata waktu tunggu mencapai <strong>{avg_waiting} menit</strong> and "
             f"<strong>{probability_wait:.1%}</strong> mahasiswa mengalami antrian. "
             f"Berdasarkan hasil simulasi ABM, sistem disarankan menambah jumlah konselor menjadi "
             f"<strong>{counselors + 1}</strong> agar tekanan antrian berkurang."
@@ -2144,7 +2020,7 @@ if st.session_state.sim_data is not None:
         body = (
             f"Sistem menunjukkan performa baik. Hanya <strong>{probability_wait:.1%}</strong> "
             f"mahasiswa mengalami waktu tunggu dengan rata-rata <strong>{avg_waiting} menit</strong>. "
-            f"Jumlah <strong>{counselors}</strong> konselor sudah sesuai untuk skenario ini."
+            f"Jumlah <strong>{counselors}</strong> konselor sudah cukup untuk kondisi simulasi ini."
         )
     else:
         sc, ico, head = "info", "ℹ️", "Sistem Berada pada Beban Sedang"
@@ -2166,22 +2042,11 @@ if st.session_state.sim_data is not None:
 
     with st.expander("Asumsi dan Keterbatasan Model"):
         st.markdown(f"""
-- **Proses kedatangan** diasumsikan mengikuti distribusi eksponensial
-  (proses Poisson) dengan rata-rata antar kedatangan {mean_interarrival:.1f} menit,
-  sesuai asumsi standar model antrian M/M/c.
-- **Antrian** dilayani murni berdasarkan urutan kedatangan (FIFO): mahasiswa
-  diarahkan ke konselor yang paling cepat tersedia.
-- **Monte Carlo** untuk mahasiswa > 200 dibatasi menjadi {mc_n} agent per iterasi
-  agar performa aplikasi tetap responsif; simulasi utama tetap memakai seluruh
-  {n_students:,} mahasiswa.
-- **Validasi Erlang-C** merupakan pembanding teoritis pada kondisi steady-state
-  dan mengasumsikan seluruh konselor identik (homogen) serta tidak ada mahasiswa
-  yang batal antre — sementara ABM memodelkan fatigue konselor dan kemungkinan
-  mahasiswa keluar dari antrian, sehingga selisih kecil dengan hasil ABM adalah wajar.
-- **Pengembangan lanjutan yang mungkin:** pola kedatangan non-stasioner (jam sibuk
-  mendekati UAS), antrian berbasis prioritas risiko, heterogenitas skill antar
-  konselor, dan analisis periode warm-up untuk memisahkan kondisi transien di
-  awal simulasi.
+- **Proses kedatangan** diasumsikan mengikuti distribusi eksponensial (proses Poisson) dengan rata-rata antar kedatangan {mean_interarrival:.1f} menit, sesuai asumsi standar model antrian M/M/c.
+- **Antrian** dilayani murni berdasarkan urutan kedatangan (FIFO): mahasiswa diarahkan ke konselor yang paling cepat tersedia.
+- **Monte Carlo** untuk mahasiswa > 200 dibatasi menjadi {mc_n} agent per iterasi agar performa aplikasi tetap responsif; simulasi utama tetap memakai seluruh {n_students:,} mahasiswa.
+- **Validasi Erlang-C** merupakan pembanding teoritis pada kondisi steady-state dan mengasumsikan seluruh konselor identik (homogen) serta tidak ada mahasiswa yang batal antre — sementara ABM memodelkan fatigue konselor dan kemungkinan mahasiswa keluar dari antrian, sehingga selisih kecil dengan hasil ABM adalah wajar.
+- **Pengembangan lanjutan yang mungkin:** pola kedatangan non-stasioner (jam sibuk mendekati UAS), antrian berbasis prioritas risiko, heterogenitas skill antar konselor, dan analisis periode warm-up untuk memisahkan kondisi transien di awal simulasi.
 """)
 
     st.markdown(
@@ -2193,7 +2058,7 @@ if st.session_state.sim_data is not None:
     )
 
 # ══════════════════════════════════════════════
-# EMPTY STATE
+# EMPTY STATE (Perbaikan teks fitur lama di sini)
 # ══════════════════════════════════════════════
 
 else:
@@ -2217,8 +2082,8 @@ else:
                 <div class="feature-name">Agent Konselor</div>
             </div>
             <div class="feature-tile">
-                <div class="feature-ico">🧠</div>
-                <div class="feature-name">Priority Queue Risiko</div>
+                <div class="feature-ico">⏳</div>
+                <div class="feature-name">Kedatangan Poisson</div>
             </div>
             <div class="feature-tile">
                 <div class="feature-ico">📊</div>
@@ -2230,7 +2095,7 @@ else:
             </div>
             <div class="feature-tile">
                 <div class="feature-ico">🎯</div>
-                <div class="feature-name">Optimasi Konselor</div>
+                <div class="feature-name">Konvergensi Monte Carlo</div>
             </div>
         </div>
     </div>""", unsafe_allow_html=True)

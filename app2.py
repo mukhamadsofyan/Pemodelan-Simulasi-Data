@@ -7,6 +7,22 @@ untuk Analisis Waktu Tunggu dan Efisiensi Sistem.
 Login demo:
 - Username: admin
 - Password: 123456
+
+Pembaruan pada revisi ini:
+1. Bug download yang membuat dashboard "keluar" ke halaman kosong sudah
+   diperbaiki (hasil disimpan di st.session_state).
+2. Interarrival time mahasiswa kini memakai distribusi EKSPONENSIAL
+   (proses Poisson), bukan uniform -- konsisten dengan asumsi model
+   antrian M/M/c, dan mendukung random seed agar dapat direproduksi.
+3. Monte Carlo diperkaya dengan interval kepercayaan 95%, persentil,
+   probabilitas melebihi ambang batas, skewness, dan grafik konvergensi.
+4. Validasi model teoritis M/M/c (Erlang-C) terhadap hasil simulasi ABM.
+5. Perbaikan bug PDF: fpdf2 versi baru mengembalikan bytearray, dikonversi
+   eksplisit ke bytes agar kompatibel dengan st.download_button.
+
+Catatan: fitur "Priority Queue / Metode Antrian" dan "Optimasi Jumlah
+Konselor" (grid search biaya + uji hipotesis) telah DIHAPUS sesuai
+permintaan -- antrian kembali murni FIFO berdasarkan urutan kedatangan.
 """
 
 
@@ -664,9 +680,11 @@ def apply_style():
     </style>
     """, unsafe_allow_html=True)
 
+
 # ============================================================
 # sim_engine.py
 # ============================================================
+import math
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -861,6 +879,10 @@ class CounselingEnvironment:
     - aturan pemilihan konselor
     - interaksi agent
     - pencatatan hasil simulasi
+
+    Antrian dilayani murni berdasarkan urutan kedatangan (FIFO):
+    mahasiswa yang datang lebih dulu, diarahkan ke konselor yang
+    paling cepat tersedia.
     """
 
     def __init__(self, dataset, cbt_power=0.5, counselors=1):
@@ -876,7 +898,8 @@ class CounselingEnvironment:
 
     def create_student_agents(self):
         """
-        Membuat StudentAgent dari dataset dan menghitung arrival time.
+        Membuat StudentAgent dari dataset dan menghitung arrival time
+        berdasarkan interarrival time kumulatif (proses kedatangan).
         """
         arrival_minutes = 0.0
         agents = []
@@ -896,7 +919,7 @@ class CounselingEnvironment:
 
     def choose_counselor(self, student):
         """
-        Aturan keputusan environment:
+        Aturan keputusan environment (mode FIFO):
         mahasiswa diarahkan ke konselor yang paling cepat tersedia.
         Jika ada kondisi sama, konselor dengan fatigue lebih rendah dipilih.
         """
@@ -908,11 +931,10 @@ class CounselingEnvironment:
     def run(self):
         """
         Menjalankan simulasi ABM berdasarkan interaksi agent.
+        Setiap mahasiswa dilayani sesuai urutan kedatangan (FIFO).
         """
         self.create_student_agents()
 
-        # Agent dengan prioritas tinggi tetap datang sesuai urutan waktu,
-        # tetapi priority_score digunakan untuk memengaruhi service time.
         for student in self.student_agents:
             counselor = self.choose_counselor(student)
             counselor.serve_student(student)
@@ -959,19 +981,72 @@ class CounselingQueueSimulation(CounselingEnvironment):
 # DATASET GENERATOR
 # ══════════════════════════════════════════════
 
-def generate_dataset(n):
+def generate_dataset(n, seed=None, mean_interarrival=25.0):
     """
     Membuat dataset agent mahasiswa secara otomatis.
     Setiap baris data akan menjadi satu StudentAgent.
+
+    Interarrival Time dibangkitkan dari distribusi EKSPONENSIAL
+    (bukan uniform), sesuai asumsi proses kedatangan Poisson yang
+    lazim dipakai pada model antrian (M/M/c) -- ini juga membuat
+    hasil simulasi ABM dapat divalidasi terhadap formula Erlang-C
+    secara konsisten (lihat erlang_c_waiting_time()).
+
+    seed: jika diisi (bukan None), hasil dataset dapat direproduksi
+    persis sama setiap kali dijalankan dengan seed yang sama.
     """
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(seed)
 
     return pd.DataFrame({
         "Student": range(1, n + 1),
-        "Interarrival Time": rng.integers(10, 60, n).astype(int),
+        "Interarrival Time": np.round(rng.exponential(scale=mean_interarrival, size=n), 2),
         "Stress Before CBT": np.round(rng.uniform(0.40, 0.95, n), 3),
         "Resilience": np.round(rng.uniform(0.15, 0.60, n), 3),
     })
+
+
+# ══════════════════════════════════════════════
+# VALIDASI TEORITIS -- MODEL ANTRIAN M/M/c (ERLANG C)
+# ══════════════════════════════════════════════
+
+def erlang_c_waiting_time(mean_interarrival, mean_service, c):
+    """
+    Menghitung ekspektasi waktu tunggu teoritis (Wq) menggunakan
+    formula Erlang C untuk model antrian M/M/c, sebagai pembanding
+    /validasi terhadap hasil rata-rata waktu tunggu simulasi ABM.
+
+    Parameter
+    ---------
+    mean_interarrival : rata-rata waktu antar kedatangan (menit)
+    mean_service       : rata-rata waktu layanan per mahasiswa (menit)
+    c                   : jumlah konselor (server)
+
+    Return
+    ------
+    (wq_teoritis, rho, is_stable)
+        wq_teoritis : ekspektasi waktu tunggu teoritis (menit), atau
+                      None jika sistem tidak stabil (rho >= 1)
+        rho         : tingkat utilisasi sistem (0-1, atau >1 jika overload)
+        is_stable   : True jika rho < 1 (sistem tidak akan "meledak")
+    """
+    if mean_interarrival <= 0 or mean_service <= 0 or c <= 0:
+        return None, None, False
+
+    lam = 1.0 / mean_interarrival      # laju kedatangan per menit
+    mu = 1.0 / mean_service            # laju layanan per konselor per menit
+    a = lam / mu                       # offered load (dalam satuan Erlang)
+    rho = a / c
+
+    if rho >= 1:
+        return None, rho, False
+
+    sum_terms = sum((a ** k) / math.factorial(k) for k in range(c))
+    last_term = (a ** c) / (math.factorial(c) * (1 - rho))
+    p0 = 1.0 / (sum_terms + last_term)
+    p_wait = last_term * p0            # Probabilitas Erlang-C (peluang harus menunggu)
+    wq = p_wait / (c * mu - lam)
+
+    return wq, rho, True
 
 
 # ============================================================
@@ -1009,7 +1084,7 @@ def export_summary_txt(summary_df, avg_waiting, counselors, probability_wait):
     lines += [
         "", sep,
         "Simulasi Antrian Konseling Mahasiswa Berbasis Agent Based Modeling",
-        "Dikembangkan untuk kebutuhan penelitian akademik."
+        "Dikembangkan untuk memenuhi tugas besar Pemodelan & Simulasi Data."
     ]
 
     return "\n".join(lines).encode("utf-8")
@@ -1133,7 +1208,9 @@ def try_fpdf(summary_df, avg_waiting, counselors, probability_wait):
             raw = pdf.output(dest="S")
             if isinstance(raw, str):
                 return raw.encode("latin-1"), "pdf"
-            return raw, "pdf"
+            # fpdf2 versi baru mengembalikan bytearray, bukan bytes --
+            # st.download_button hanya menerima bytes/str, jadi dikonversi eksplisit.
+            return bytes(raw), "pdf"
         except Exception:
             buf = io.BytesIO()
             pdf.output(buf)
@@ -1284,6 +1361,120 @@ def make_svg_hist(values, bins=25, color="#1a3a6b", mean_color="#b8860b",
             f'<rect width="{width}" height="{height}" fill="#fafcfe" rx="8"/>'
             + grid + rects + mline + xlabels + '</svg>')
 
+
+def make_svg_single_line(x_vals, y_vals, label, color="#1a3a6b",
+                         band_lo=None, band_hi=None, ref_val=None, ref_label="",
+                         width=600, height=260):
+    """
+    Grafik satu garis -- dipakai untuk analisis konvergensi Monte Carlo
+    (running mean terhadap jumlah iterasi). Bisa ditambahkan pita
+    (band_lo/band_hi, misal interval kepercayaan) dan garis referensi
+    horizontal (ref_val, misal nilai teoritis Erlang-C untuk validasi).
+    """
+    n = len(x_vals)
+    if n == 0: return ""
+    pad  = dict(l=52, r=20, t=36, b=40)
+    W    = width - pad["l"] - pad["r"]
+    H    = height - pad["t"] - pad["b"]
+
+    all_vals = list(y_vals)
+    if band_lo is not None: all_vals += list(band_lo)
+    if band_hi is not None: all_vals += list(band_hi)
+    if ref_val is not None: all_vals.append(ref_val)
+
+    ymax = max(float(np.max(all_vals)), 0.01)
+    ymin = min(0.0, float(np.min(all_vals)))
+
+    def px(i): return pad["l"] + (i / max(n - 1, 1)) * W
+    def py(v): return pad["t"] + H - ((v - ymin) / (ymax - ymin + 1e-9)) * H
+
+    grid = _grid_y(pad, W, H, ymin, ymax, fmt=".2f")
+
+    band = ""
+    if band_lo is not None and band_hi is not None:
+        pts_hi = " ".join(f"{px(i):.1f},{py(v):.1f}" for i, v in enumerate(band_hi))
+        pts_lo = " ".join(f"{px(i):.1f},{py(v):.1f}" for i, v in enumerate(reversed(list(band_lo))))
+        band = f'<polygon points="{pts_hi} {pts_lo}" fill="{color}" opacity="0.10"/>'
+
+    pts = " ".join(f"{px(i):.1f},{py(v):.1f}" for i, v in enumerate(y_vals))
+    line = (f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2"'
+            f' stroke-linejoin="round" stroke-linecap="round"/>')
+
+    ref_line = ""
+    if ref_val is not None:
+        ry = py(ref_val)
+        ref_line = (f'<line x1="{pad["l"]}" y1="{ry:.1f}" x2="{pad["l"]+W}" y2="{ry:.1f}"'
+                    f' stroke="#b8860b" stroke-width="1.6" stroke-dasharray="6,3"/>'
+                    f'<text x="{pad["l"]+W-4}" y="{ry-4:.1f}" fill="#b8860b" font-size="9"'
+                    f' text-anchor="end" font-family=\'IBM Plex Mono,monospace\' font-weight="600">{ref_label}</text>')
+
+    step = max(1, n // 8)
+    xlabels = "".join(
+        f'<text x="{px(i):.1f}" y="{pad["t"]+H+16}" fill="#8fa3b8" font-size="9"'
+        f' text-anchor="middle" font-family="IBM Plex Mono,monospace">{int(x_vals[i])}</text>'
+        for i in range(0, n, step))
+
+    legend = (f'<rect x="{pad["l"]}" y="10" width="10" height="10" fill="{color}" rx="2"/>'
+              f'<text x="{pad["l"]+14}" y="19" fill="#4a6080" font-size="9"'
+              f' font-family="Outfit,sans-serif">{label}</text>')
+
+    return (f'<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg"'
+            f' style="width:100%;height:auto;display:block;">'
+            f'<rect width="{width}" height="{height}" fill="#fafcfe" rx="8"/>'
+            + grid + band + line + ref_line + xlabels + legend + '</svg>')
+
+
+def make_svg_box(labels, data_lists, color="#1a3a6b", width=600, height=280):
+    """
+    Boxplot sederhana -- dipakai untuk membandingkan distribusi hasil
+    Monte Carlo antar skenario (misal: beberapa jumlah konselor sekaligus).
+    """
+    n = len(labels)
+    if n == 0: return ""
+    pad  = dict(l=52, r=20, t=36, b=40)
+    W    = width - pad["l"] - pad["r"]
+    H    = height - pad["t"] - pad["b"]
+
+    stats = []
+    all_vals = []
+    for vals in data_lists:
+        v = np.asarray(vals, dtype=float)
+        q1, med, q3 = np.percentile(v, [25, 50, 75])
+        lo, hi = float(np.min(v)), float(np.max(v))
+        stats.append((lo, q1, med, q3, hi))
+        all_vals += [lo, hi]
+
+    vmax = max(all_vals) if all_vals else 1.0
+    vmin = min(0.0, min(all_vals) if all_vals else 0.0)
+
+    grid = _grid_y(pad, W, H, vmin, vmax, fmt=".1f")
+
+    gap = W / n
+    box_w = max(10.0, gap * 0.42)
+
+    def py(v): return pad["t"] + H - ((v - vmin) / max(vmax - vmin, 1e-9)) * H
+
+    elems = ""
+    for i, (lo, q1, med, q3, hi) in enumerate(stats):
+        cx = pad["l"] + i * gap + gap / 2
+        x0 = cx - box_w / 2
+
+        elems += (f'<line x1="{cx:.1f}" y1="{py(lo):.1f}" x2="{cx:.1f}" y2="{py(hi):.1f}"'
+                  f' stroke="{color}" stroke-width="1.4"/>')
+        elems += (f'<rect x="{x0:.1f}" y="{py(q3):.1f}" width="{box_w:.1f}"'
+                  f' height="{max(1.0, py(q1)-py(q3)):.1f}" fill="{color}" opacity="0.30"'
+                  f' stroke="{color}" stroke-width="1.2" rx="2"/>')
+        elems += (f'<line x1="{x0:.1f}" y1="{py(med):.1f}" x2="{x0+box_w:.1f}" y2="{py(med):.1f}"'
+                  f' stroke="{color}" stroke-width="2.2"/>')
+        elems += (f'<text x="{cx:.1f}" y="{pad["t"]+H+16}" fill="#8fa3b8" font-size="9"'
+                  f' text-anchor="middle" font-family="IBM Plex Mono,monospace">{labels[i]}</text>')
+
+    return (f'<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg"'
+            f' style="width:100%;height:auto;display:block;">'
+            f'<rect width="{width}" height="{height}" fill="#fafcfe" rx="8"/>'
+            + grid + elems + '</svg>')
+
+
 # ============================================================
 # ui_helpers.py
 # ============================================================
@@ -1316,6 +1507,7 @@ def chart(title, sub, svg):
         f'<div class="chart-sublabel">{sub}</div>'
         f'{svg}</div>', unsafe_allow_html=True)
 
+
 # ============================================================
 # app.py - APLIKASI UTAMA
 # ============================================================
@@ -1323,6 +1515,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime
+from scipy import stats
 import time
 
 
@@ -1370,6 +1563,16 @@ if not st.session_state.login:
     st.stop()
 
 # ══════════════════════════════════════════════
+# STATE HASIL SIMULASI (agar tidak hilang saat rerun,
+# misalnya saat tombol download diklik)
+# ══════════════════════════════════════════════
+
+if "sim_data" not in st.session_state:
+    st.session_state.sim_data = None
+if "last_upload_key" not in st.session_state:
+    st.session_state.last_upload_key = None
+
+# ══════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════
 
@@ -1380,7 +1583,7 @@ with st.sidebar:
             <div class="sb-logo-icon">🎓</div>
             <div>
                 <div class="sb-logo-text">Simulasi Konseling</div>
-                <div class="sb-logo-ver">ABM · Progress 3</div>
+                <div class="sb-logo-ver">202310370311135 · Mukhamad Sofyan</div>
             </div>
         </div>
     </div>""", unsafe_allow_html=True)
@@ -1390,6 +1593,12 @@ with st.sidebar:
     cbt_power = st.slider("Efektivitas CBT", 0.10, 1.00, 0.50, step=0.05)
     counselors = st.slider("Jumlah Konselor", 1, 20, 1)
     monte_carlo_runs = st.slider("Jumlah Iterasi Monte Carlo", 10, 500, 100, step=10)
+
+    st.markdown('<div class="div-label">Pengaturan Lanjutan</div>', unsafe_allow_html=True)
+    use_seed = st.checkbox("Gunakan Random Seed (dapat direproduksi)", value=False)
+    seed_value = None
+    if use_seed:
+        seed_value = st.number_input("Seed", min_value=0, max_value=999999, value=42, step=1)
 
     st.markdown('<div class="div-label">Dataset</div>', unsafe_allow_html=True)
     uploaded_file = st.file_uploader(
@@ -1404,6 +1613,7 @@ with st.sidebar:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("Keluar", use_container_width=True):
         st.session_state.login = False
+        st.session_state.sim_data = None
         st.rerun()
 
 # ══════════════════════════════════════════════
@@ -1445,10 +1655,27 @@ st.markdown("""
 </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════
-# MAIN FLOW
+# TENTUKAN APAKAH SIMULASI PERLU DIJALANKAN ULANG
+# ══════════════════════════════════════════════
+# generate_button hanya True pada run tempat tombol diklik.
+# uploaded_file tetap ada di session Streamlit selama file belum dihapus,
+# jadi dipakai kunci (nama+ukuran) untuk mendeteksi file BARU saja —
+# supaya rerun akibat klik unduh tidak memicu simulasi ulang.
+
+upload_key = None
+if uploaded_file is not None:
+    upload_key = f"{uploaded_file.name}-{uploaded_file.size}"
+
+is_new_upload = upload_key is not None and upload_key != st.session_state.last_upload_key
+run_trigger = generate_button or is_new_upload
+
+# ══════════════════════════════════════════════
+# JALANKAN SIMULASI (hanya saat tombol diklik / file baru diunggah)
 # ══════════════════════════════════════════════
 
-if generate_button or uploaded_file is not None:
+if run_trigger:
+
+    base_seed = int(seed_value) if use_seed else None
 
     # Dataset
     if uploaded_file is not None:
@@ -1461,10 +1688,11 @@ if generate_button or uploaded_file is not None:
             st.stop()
 
         dataset = dataset[required].reset_index(drop=True)
+        st.session_state.last_upload_key = upload_key
         st.success(f"Dataset berhasil diunggah — {len(dataset):,} mahasiswa dimuat")
     else:
         with st.spinner("Membuat dataset agent mahasiswa..."):
-            dataset = generate_dataset(total_students)
+            dataset = generate_dataset(total_students, seed=base_seed)
 
     n_students = len(dataset)
 
@@ -1473,7 +1701,9 @@ if generate_button or uploaded_file is not None:
     prog = st.progress(0)
     stat = st.empty()
 
-    model = CounselingQueueSimulation(dataset, cbt_power=cbt_power, counselors=counselors)
+    model = CounselingQueueSimulation(
+        dataset, cbt_power=cbt_power, counselors=counselors
+    )
     result = model.run()
 
     batch = max(1, n_students // 40)
@@ -1511,6 +1741,137 @@ if generate_button or uploaded_file is not None:
     max_waiting = int(result["Waiting Time"].max())
     avg_priority = round(result["Priority Score"].mean(), 4) if "Priority Score" in result else 0
     avg_tolerance = round(result["Wait Tolerance"].mean(), 2) if "Wait Tolerance" in result else 0
+    mean_interarrival = float(dataset["Interarrival Time"].mean())
+
+    summary_df = pd.DataFrame({
+        "Indikator": [
+            "Jumlah Mahasiswa",
+            "Jumlah Konselor",
+            "Rata-rata Waktu Tunggu (menit)",
+            "Waktu Tunggu Maksimum (menit)",
+            "Rata-rata Waktu Layanan (menit)",
+            "Rata-rata Idle Time Konselor (menit)",
+            "Probabilitas Menunggu",
+            "Rata-rata Stres Sebelum CBT",
+            "Rata-rata Stres Setelah CBT",
+            "Rata-rata Penurunan Stres",
+            "Rata-rata Priority Score Agent",
+            "Rata-rata Toleransi Tunggu Agent",
+            "Efektivitas CBT",
+            "Metode Simulasi",
+        ],
+        # Dicetak sebagai string (bukan number) karena kolom ini berisi
+        # campuran angka dan teks (mis. "Metode Simulasi") -- tipe campuran
+        # membuat Streamlit/Arrow memicu peringatan konversi saat ditampilkan.
+        "Nilai": [
+            str(n_students),
+            str(counselors),
+            str(avg_waiting),
+            str(max_waiting),
+            str(avg_service),
+            str(avg_idle),
+            f"{probability_wait:.2%}",
+            str(avg_stress_before),
+            str(avg_stress_after),
+            str(avg_stress_red),
+            str(avg_priority),
+            str(avg_tolerance),
+            str(cbt_power),
+            "Agent Based Modeling",
+        ]
+    })
+
+    # ─────────────────────────────────────────
+    # Monte Carlo: kumpulkan hasil + informasi tambahan
+    # untuk analisis konvergensi & interval kepercayaan
+    # ─────────────────────────────────────────
+    mc_n = min(n_students, 200)
+    with st.spinner(f"Menjalankan {monte_carlo_runs} iterasi Monte Carlo..."):
+        mc_rows = []
+
+        for it in range(monte_carlo_runs):
+            iter_seed = (base_seed + it + 1) if base_seed is not None else None
+            d = generate_dataset(mc_n, seed=iter_seed)
+            r = CounselingQueueSimulation(
+                d, cbt_power=cbt_power, counselors=counselors
+            ).run()
+
+            mc_rows.append({
+                "Rata-rata Waktu Tunggu": round(float(r["Waiting Time"].mean()), 3),
+                "Probabilitas Menunggu": round(float((r["Waiting Time"] > 0).mean()), 4),
+                "Rata-rata Waktu Layanan": round(float(r["Service Time"].mean()), 3),
+                "Rata-rata Penurunan Stres": round(float((r["Stress Before CBT"] - r["Stress After CBT"]).mean()), 4),
+            })
+
+    mc_df = pd.DataFrame(mc_rows)
+
+    # ─────────────────────────────────────────
+    # Validasi teoritis M/M/c (Erlang-C)
+    # ─────────────────────────────────────────
+    wq_theory, rho_theory, is_stable = erlang_c_waiting_time(
+        mean_interarrival=mean_interarrival, mean_service=avg_service, c=counselors
+    )
+
+    # Simpan SEMUA hasil ke session_state agar tetap tampil
+    # walaupun terjadi rerun (misalnya akibat klik tombol download)
+    st.session_state.sim_data = {
+        "dataset": dataset,
+        "result": result,
+        "summary_df": summary_df,
+        "mc_df": mc_df,
+        "wq_theory": wq_theory,
+        "rho_theory": rho_theory,
+        "is_stable": is_stable,
+        "mean_interarrival": mean_interarrival,
+        "n_students": n_students,
+        "counselors": counselors,
+        "cbt_power": cbt_power,
+        "monte_carlo_runs": monte_carlo_runs,
+        "mc_n": mc_n,
+        "avg_waiting": avg_waiting,
+        "avg_service": avg_service,
+        "avg_idle": avg_idle,
+        "probability_wait": probability_wait,
+        "avg_stress_before": avg_stress_before,
+        "avg_stress_after": avg_stress_after,
+        "avg_stress_red": avg_stress_red,
+        "max_waiting": max_waiting,
+        "avg_priority": avg_priority,
+        "avg_tolerance": avg_tolerance,
+    }
+
+# ══════════════════════════════════════════════
+# TAMPILKAN HASIL (dari session_state, bukan dari
+# variabel lokal) — sehingga tombol download / interaksi
+# lain yang memicu rerun TIDAK membuang hasil simulasi
+# ══════════════════════════════════════════════
+
+if st.session_state.sim_data is not None:
+
+    sd = st.session_state.sim_data
+    dataset = sd["dataset"]
+    result = sd["result"]
+    summary_df = sd["summary_df"]
+    mc_df = sd["mc_df"]
+    wq_theory = sd["wq_theory"]
+    rho_theory = sd["rho_theory"]
+    is_stable = sd["is_stable"]
+    mean_interarrival = sd["mean_interarrival"]
+    n_students = sd["n_students"]
+    counselors = sd["counselors"]
+    cbt_power = sd["cbt_power"]
+    monte_carlo_runs = sd["monte_carlo_runs"]
+    mc_n = sd["mc_n"]
+    avg_waiting = sd["avg_waiting"]
+    avg_service = sd["avg_service"]
+    avg_idle = sd["avg_idle"]
+    probability_wait = sd["probability_wait"]
+    avg_stress_before = sd["avg_stress_before"]
+    avg_stress_after = sd["avg_stress_after"]
+    avg_stress_red = sd["avg_stress_red"]
+    max_waiting = sd["max_waiting"]
+    avg_priority = sd["avg_priority"]
+    avg_tolerance = sd["avg_tolerance"]
 
     sec(2, "Indikator Kinerja Utama")
 
@@ -1542,41 +1903,6 @@ if generate_button or uploaded_file is not None:
     )
 
     st.markdown(row1_html + row2_html + row3_html, unsafe_allow_html=True)
-
-    summary_df = pd.DataFrame({
-        "Indikator": [
-            "Jumlah Mahasiswa",
-            "Jumlah Konselor",
-            "Rata-rata Waktu Tunggu (menit)",
-            "Waktu Tunggu Maksimum (menit)",
-            "Rata-rata Waktu Layanan (menit)",
-            "Rata-rata Idle Time Konselor (menit)",
-            "Probabilitas Menunggu",
-            "Rata-rata Stres Sebelum CBT",
-            "Rata-rata Stres Setelah CBT",
-            "Rata-rata Penurunan Stres",
-            "Rata-rata Priority Score Agent",
-            "Rata-rata Toleransi Tunggu Agent",
-            "Efektivitas CBT",
-            "Metode Simulasi",
-        ],
-        "Nilai": [
-            n_students,
-            counselors,
-            avg_waiting,
-            max_waiting,
-            avg_service,
-            avg_idle,
-            f"{probability_wait:.2%}",
-            avg_stress_before,
-            avg_stress_after,
-            avg_stress_red,
-            avg_priority,
-            avg_tolerance,
-            cbt_power,
-            "Agent Based Modeling",
-        ]
-    })
 
     # Visualisasi
     sec(3, "Visualisasi Hasil Simulasi")
@@ -1668,7 +1994,8 @@ if generate_button or uploaded_file is not None:
             data=csv_bytes,
             file_name=f"hasil_simulasi_abm_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
             mime="text/csv",
-            use_container_width=True
+            use_container_width=True,
+            key="dl_csv"
         )
 
     pdf_bytes, ext = try_fpdf(summary_df, avg_waiting, counselors, probability_wait)
@@ -1681,28 +2008,14 @@ if generate_button or uploaded_file is not None:
             data=pdf_bytes,
             file_name=f"laporan_simulasi_abm_{datetime.now().strftime('%Y%m%d_%H%M')}.{ext}",
             mime=mime_lut[ext],
-            use_container_width=True
+            use_container_width=True,
+            key="dl_pdf"
         )
 
+    # ─────────────────────────────────────────
     # Monte Carlo
+    # ─────────────────────────────────────────
     sec(6, "Analisis Monte Carlo")
-
-    mc_n = min(n_students, 200)
-    with st.spinner(f"Menjalankan {monte_carlo_runs} iterasi Monte Carlo..."):
-        mc_rows = []
-
-        for _ in range(monte_carlo_runs):
-            d = generate_dataset(mc_n)
-            r = CounselingQueueSimulation(d, cbt_power=cbt_power, counselors=counselors).run()
-
-            mc_rows.append({
-                "Rata-rata Waktu Tunggu": round(float(r["Waiting Time"].mean()), 3),
-                "Probabilitas Menunggu": round(float((r["Waiting Time"] > 0).mean()), 4),
-                "Rata-rata Waktu Layanan": round(float(r["Service Time"].mean()), 3),
-                "Rata-rata Penurunan Stres": round(float((r["Stress Before CBT"] - r["Stress After CBT"]).mean()), 4),
-            })
-
-    mc_df = pd.DataFrame(mc_rows)
 
     if n_students > 200:
         st.info(
@@ -1710,17 +2023,60 @@ if generate_button or uploaded_file is not None:
             f"Simulasi utama tetap menggunakan {n_students:,} mahasiswa."
         )
 
+    wt_vals = mc_df["Rata-rata Waktu Tunggu"].values
+    mean_wt = float(np.mean(wt_vals))
+    sem_wt = stats.sem(wt_vals) if len(wt_vals) > 1 else 0.0
+    ci_half = sem_wt * stats.t.ppf(0.975, max(len(wt_vals) - 1, 1)) if len(wt_vals) > 1 else 0.0
+    ci_lo, ci_hi = mean_wt - ci_half, mean_wt + ci_half
+    p50, p90, p95 = np.percentile(wt_vals, [50, 90, 95])
+    prob_exceed_20 = float((wt_vals > 20).mean())
+    skew_wt = float(stats.skew(wt_vals))
+
+    mc_kpi_html = (
+        '<div class="kpi-grid">'
+        + kpi("Rata-rata Waktu Tunggu (95% CI)", f"{mean_wt:.2f}", f"[{ci_lo:.2f}, {ci_hi:.2f}] menit", "royal", "📐")
+        + kpi("Persentil 90 Waktu Tunggu", f"{p90:.2f}", "menit", "amber", "📈")
+        + kpi("Persentil 95 Waktu Tunggu", f"{p95:.2f}", "menit", "crimson", "📈")
+        + kpi("P(Waktu Tunggu > 20 menit)", f"{prob_exceed_20:.1%}", "risiko antrian panjang", "teal", "⚠")
+        + '</div>'
+    )
+    st.markdown(mc_kpi_html, unsafe_allow_html=True)
+
     mc1, mc2 = st.columns(2)
     with mc1:
         st.markdown("**Statistik Deskriptif**")
         st.dataframe(mc_df.describe().round(4), use_container_width=True)
+        st.caption(
+            f"Skewness rata-rata waktu tunggu: {skew_wt:.3f} "
+            f"({'menceng kanan' if skew_wt > 0.2 else 'menceng kiri' if skew_wt < -0.2 else 'relatif simetris'})."
+        )
 
     with mc2:
         chart(
             "Distribusi Waktu Tunggu Monte Carlo",
             f"Berdasarkan {monte_carlo_runs} iterasi dengan {mc_n} mahasiswa per iterasi",
-            make_svg_hist(mc_df["Rata-rata Waktu Tunggu"].values, bins=20, color="#1a3a6b", mean_color="#b8860b")
+            make_svg_hist(wt_vals, bins=20, color="#1a3a6b", mean_color="#b8860b")
         )
+
+    # Analisis konvergensi: running mean + pita CI ekspanding
+    running_mean = pd.Series(wt_vals).expanding().mean()
+    running_std = pd.Series(wt_vals).expanding().std().fillna(0)
+    running_n = np.arange(1, len(wt_vals) + 1)
+    running_se = running_std / np.sqrt(running_n)
+    running_lo = (running_mean - 1.96 * running_se).values
+    running_hi = (running_mean + 1.96 * running_se).values
+
+    ref_val = wq_theory if (wq_theory is not None) else None
+    chart(
+        "Analisis Konvergensi Monte Carlo",
+        "Rata-rata kumulatif waktu tunggu seiring bertambahnya iterasi "
+        + ("(garis putus-putus emas = estimasi teoritis Erlang-C)" if ref_val else ""),
+        make_svg_single_line(
+            running_n.tolist(), running_mean.values.tolist(), "Running Mean",
+            color="#1a3a6b", band_lo=running_lo.tolist(), band_hi=running_hi.tolist(),
+            ref_val=ref_val, ref_label="Erlang-C"
+        )
+    )
 
     chart(
         "Waktu Layanan vs Waktu Tunggu Monte Carlo",
@@ -1736,8 +2092,44 @@ if generate_button or uploaded_file is not None:
         )
     )
 
+    # ─────────────────────────────────────────
+    # Validasi teoritis M/M/c (Erlang-C)
+    # ─────────────────────────────────────────
+    sec(7, "Validasi Model Teoritis (M/M/c — Erlang-C)")
+
+    st.markdown(
+        "Karena waktu antar-kedatangan mahasiswa dibangkitkan dari distribusi "
+        "eksponensial (proses kedatangan Poisson), hasil simulasi ABM dapat "
+        "dibandingkan dengan estimasi teoritis model antrian klasik M/M/c "
+        "sebagai bentuk validasi model."
+    )
+
+    if is_stable and wq_theory is not None:
+        diff_pct = ((avg_waiting - wq_theory) / wq_theory * 100) if wq_theory > 0 else 0
+        v1, v2, v3 = st.columns(3)
+        with v1:
+            st.metric("Waktu Tunggu Simulasi ABM", f"{avg_waiting:.2f} menit")
+        with v2:
+            st.metric("Waktu Tunggu Teoritis (Erlang-C)", f"{wq_theory:.2f} menit")
+        with v3:
+            st.metric("Selisih", f"{diff_pct:+.1f}%")
+        st.caption(
+            f"Tingkat utilisasi sistem (ρ) = {rho_theory:.2f}. Selisih antara simulasi "
+            "ABM dan model teoritis wajar terjadi karena model ABM memasukkan faktor "
+            "tambahan yang tidak ada pada M/M/c murni, seperti fatigue konselor, "
+            "penyesuaian waktu layanan berbasis stres/prioritas, dan kemungkinan "
+            "mahasiswa batal antre."
+        )
+    else:
+        st.warning(
+            f"Sistem berada pada kondisi **tidak stabil** secara teoritis "
+            f"(utilisasi ρ = {rho_theory:.2f} ≥ 1 jika dihitung dengan model M/M/c). "
+            "Ini berarti laju kedatangan mahasiswa melebihi kapasitas layanan "
+            "konselor saat ini — jumlah konselor perlu ditambah."
+        )
+
     # Rekomendasi
-    sec(7, "Rekomendasi Sistem")
+    sec(8, "Rekomendasi Sistem")
 
     if avg_waiting > 20 or probability_wait > 0.60:
         sc, ico, head = "warn", "⚠️", "Sistem Antrian Padat"
@@ -1772,10 +2164,30 @@ if generate_button or uploaded_file is not None:
         unsafe_allow_html=True
     )
 
+    with st.expander("Asumsi dan Keterbatasan Model"):
+        st.markdown(f"""
+- **Proses kedatangan** diasumsikan mengikuti distribusi eksponensial
+  (proses Poisson) dengan rata-rata antar kedatangan {mean_interarrival:.1f} menit,
+  sesuai asumsi standar model antrian M/M/c.
+- **Antrian** dilayani murni berdasarkan urutan kedatangan (FIFO): mahasiswa
+  diarahkan ke konselor yang paling cepat tersedia.
+- **Monte Carlo** untuk mahasiswa > 200 dibatasi menjadi {mc_n} agent per iterasi
+  agar performa aplikasi tetap responsif; simulasi utama tetap memakai seluruh
+  {n_students:,} mahasiswa.
+- **Validasi Erlang-C** merupakan pembanding teoritis pada kondisi steady-state
+  dan mengasumsikan seluruh konselor identik (homogen) serta tidak ada mahasiswa
+  yang batal antre — sementara ABM memodelkan fatigue konselor dan kemungkinan
+  mahasiswa keluar dari antrian, sehingga selisih kecil dengan hasil ABM adalah wajar.
+- **Pengembangan lanjutan yang mungkin:** pola kedatangan non-stasioner (jam sibuk
+  mendekati UAS), antrian berbasis prioritas risiko, heterogenitas skill antar
+  konselor, dan analisis periode warm-up untuk memisahkan kondisi transien di
+  awal simulasi.
+""")
+
     st.markdown(
         f'<div class="footer-strip">'
         f'<span><strong>Simulasi Antrian Konseling Mahasiswa</strong> · Agent Based Modeling</span>'
-        f'<span>Progress 3 · {datetime.now().strftime("%d %B %Y")}</span>'
+        f'<span>Mukhamad Sofyan · {datetime.now().strftime("%d %B %Y")}</span>'
         f'</div>',
         unsafe_allow_html=True
     )
@@ -1806,19 +2218,19 @@ else:
             </div>
             <div class="feature-tile">
                 <div class="feature-ico">🧠</div>
-                <div class="feature-name">Prioritas Risiko</div>
+                <div class="feature-name">Priority Queue Risiko</div>
             </div>
             <div class="feature-tile">
                 <div class="feature-ico">📊</div>
                 <div class="feature-name">Analisis Waktu Tunggu</div>
             </div>
             <div class="feature-tile">
-                <div class="feature-ico">💾</div>
-                <div class="feature-name">Export CSV dan PDF</div>
+                <div class="feature-ico">📐</div>
+                <div class="feature-name">Validasi Erlang-C</div>
             </div>
             <div class="feature-tile">
-                <div class="feature-ico">🤖</div>
-                <div class="feature-name">Agent Based Modeling</div>
+                <div class="feature-ico">🎯</div>
+                <div class="feature-name">Optimasi Konselor</div>
             </div>
         </div>
     </div>""", unsafe_allow_html=True)

@@ -7,6 +7,11 @@ untuk Analisis Waktu Tunggu dan Efisiensi Sistem.
 Login demo:
 - Username: admin
 - Password: 123456
+
+CATATAN PERUBAHAN (agar perhitungan manual lebih mudah):
+- Kolom "Interarrival Time" dibulatkan menjadi BILANGAN BULAT (tanpa desimal/koma).
+- Kolom "Counselor Idle Time" dibulatkan menjadi BILANGAN BULAT (tanpa desimal/koma).
+- Kolom "Wait Tolerance" dibulatkan menjadi BILANGAN BULAT (tanpa desimal/koma).
 """
 
 
@@ -763,9 +768,11 @@ class StudentAgent:
         """
         Toleransi menunggu dipengaruhi oleh resilience dan stres awal.
         Resilience tinggi membuat mahasiswa lebih mampu menunggu.
+        Dibulatkan menjadi bilangan BULAT (tanpa desimal) agar
+        perhitungan manual lebih mudah.
         """
         tolerance = 25 + (self.resilience * 45) - (self.stress_before * 15)
-        return max(10, round(tolerance, 2))
+        return int(max(10, round(tolerance)))
 
     def update_stress_while_waiting(self, waiting_minutes):
         """
@@ -864,7 +871,9 @@ class CounselorAgent:
         student.service_begin = service_begin
         student.service_end = service_end
         student.waiting_time = waiting_time
-        student.counselor_idle_time = idle_time
+        # Idle time konselor dibulatkan menjadi bilangan BULAT
+        # (tanpa desimal) agar perhitungan manual lebih mudah.
+        student.counselor_idle_time = int(round(idle_time))
         student.assigned_counselor = self.counselor_id
 
         self.available_time = service_end
@@ -981,6 +990,13 @@ class CounselingEnvironment:
         out["Current Stress"] = [s.current_stress for s in self.student_agents]
         out["Agent Status"] = [s.status for s in self.student_agents]
 
+        # Jaga-jaga: pastikan kolom Interarrival Time, Counselor Idle Time,
+        # dan Wait Tolerance benar-benar bilangan bulat (tanpa desimal/koma),
+        # meskipun dataset input berasal dari file upload yang masih desimal.
+        for col in ["Interarrival Time", "Counselor Idle Time", "Wait Tolerance"]:
+            if col in out.columns:
+                out[col] = out[col].round(0).astype(int)
+
         return out
 
 
@@ -1004,14 +1020,21 @@ def generate_dataset(n, seed=None, mean_interarrival=25.0):
     hasil simulasi ABM dapat divalidasi terhadap formula Erlang-C
     secara konsisten (lihat erlang_c_waiting_time()).
 
+    Interarrival Time dibulatkan menjadi bilangan BULAT (tanpa
+    desimal/koma) agar perhitungan manual lebih mudah, dengan nilai
+    minimum 1 menit supaya proses kedatangan tetap valid.
+
     seed: jika diisi (bukan None), hasil dataset dapat direproduksi
     persis sama setiap kali dijalankan dengan seed yang sama.
     """
     rng = np.random.default_rng(seed)
 
+    interarrival = rng.exponential(scale=mean_interarrival, size=n)
+    interarrival = np.maximum(1, np.round(interarrival)).astype(int)
+
     return pd.DataFrame({
         "Student": range(1, n + 1),
-        "Interarrival Time": np.round(rng.exponential(scale=mean_interarrival, size=n), 2),
+        "Interarrival Time": interarrival,
         "Stress Before CBT": np.round(rng.uniform(0.40, 0.95, n), 3),
         "Resilience": np.round(rng.uniform(0.15, 0.60, n), 3),
     })
@@ -1613,6 +1636,10 @@ if run_trigger:
             st.stop()
 
         dataset = dataset[required].reset_index(drop=True)
+        # Interarrival Time dari dataset upload juga dibulatkan menjadi
+        # bilangan BULAT (tanpa desimal/koma) agar konsisten dan lebih
+        # mudah dihitung manual.
+        dataset["Interarrival Time"] = dataset["Interarrival Time"].round(0).astype(int)
         st.session_state.last_upload_key = upload_key
         st.success(f"Dataset berhasil diunggah — {len(dataset):,} mahasiswa dimuat")
     else:
@@ -2076,7 +2103,7 @@ if st.session_state.sim_data is not None:
 
     with st.expander("Asumsi dan Keterbatasan Model"):
         st.markdown(f"""
-- **Proses kedatangan** diasumsikan mengikuti distribusi eksponensial (proses Poisson) dengan rata-rata antar kedatangan {mean_interarrival:.1f} menit, sesuai asumsi standar model antrian M/M/c.
+- **Proses kedatangan** diasumsikan mengikuti distribusi eksponensial (proses Poisson) dengan rata-rata antar kedatangan {mean_interarrival:.1f} menit, sesuai asumsi standar model antrian M/M/c. Nilai Interarrival Time dibulatkan menjadi bilangan bulat (tanpa desimal) agar perhitungan manual lebih mudah.
 - **Antrian** dilayani murni berdasarkan urutan kedatangan (FIFO): mahasiswa diarahkan ke konselor yang paling cepat tersedia.
 - **Monte Carlo** untuk mahasiswa > 200 dibatasi menjadi {mc_n} agent per iterasi agar performa aplikasi tetap responsif; simulasi utama tetap memakai seluruh {n_students:,} mahasiswa.
 - **Validasi Erlang-C** merupakan pembanding teoritis pada kondisi steady-state dan mengasumsikan seluruh konselor identik (homogen) serta tidak ada mahasiswa yang batal antre — sementara ABM memodelkan fatigue konselor dan kemungkinan mahasiswa keluar dari antrian, sehingga selisih kecil dengan hasil ABM adalah wajar.

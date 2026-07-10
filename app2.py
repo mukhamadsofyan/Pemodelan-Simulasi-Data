@@ -712,8 +712,46 @@ from datetime import datetime, timedelta
 
 START_TIME = datetime.strptime("08:00", "%H:%M")
 
+# ── Jam operasional layanan konseling ──
+# Layanan buka 08:00 dan tutup 21:00 setiap hari (13 jam operasional/hari).
+# Mahasiswa yang datang di luar jam ini, ATAU yang gilirannya baru tiba
+# setelah jam tutup karena antrian panjang, DITOLAK/tidak dilayani --
+# bukan otomatis dijadwalkan ulang. Ini sesuai logika dunia nyata: kalau
+# kantor sudah tutup, pintu ditutup, tidak ada yang menunggu di lorong
+# sampai besok. Sesi yang SUDAH BERJALAN sebelum jam tutup tetap
+# dibiarkan selesai (tidak dipotong di tengah sesi).
+OPEN_HOUR = 8
+CLOSE_HOUR = 21
+OPEN_MINUTE_OF_DAY = OPEN_HOUR * 60     # 480
+CLOSE_MINUTE_OF_DAY = CLOSE_HOUR * 60   # 1260
+
 def to_clock(minutes):
-    return (START_TIME + timedelta(minutes=int(minutes))).strftime("%H:%M")
+    """
+    Mengonversi menit kumulatif (menit riil sejak simulasi dimulai)
+    menjadi jam tampilan kalender asli. Jika sudah melewati hari
+    pertama, diberi label "Hari N" di depan jamnya. Waktu di luar jam
+    operasional (mis. 22:15) akan tetap tertampil apa adanya -- untuk
+    menunjukkan bahwa mahasiswa tersebut datang saat kantor tutup.
+    """
+    total_minutes = int(round(minutes))
+    dt = START_TIME + timedelta(minutes=total_minutes)
+    day_index = (dt.date() - START_TIME.date()).days   # 0 = hari ke-1
+    clock_str = dt.strftime("%H:%M")
+
+    if day_index == 0:
+        return clock_str
+    return f"Hari {day_index + 1} · {clock_str}"
+
+
+def is_open_at(minutes):
+    """
+    Mengecek apakah suatu titik waktu (dalam menit kumulatif sejak
+    simulasi dimulai) berada di dalam jam operasional (08:00-21:00).
+    """
+    total_minutes = int(round(minutes))
+    dt = START_TIME + timedelta(minutes=total_minutes)
+    minute_of_day = dt.hour * 60 + dt.minute
+    return OPEN_MINUTE_OF_DAY <= minute_of_day < CLOSE_MINUTE_OF_DAY
 
 
 # ══════════════════════════════════════════════
@@ -851,9 +889,26 @@ class CounselorAgent:
         Interaksi utama antara CounselorAgent dan StudentAgent.
         Konselor melayani mahasiswa, menghitung waktu tunggu,
         idle time, service time, dan memperbarui status agent.
+
+        Jika giliran mahasiswa ini (setelah menunggu konselor tersedia)
+        baru tiba SETELAH jam tutup (21:00), mahasiswa DITOLAK -- tidak
+        dilayani hari itu. Idle time / available_time konselor tidak
+        diperbarui untuk mahasiswa yang ditolak, karena konselor
+        memang tidak melayani siapa pun.
         """
-        idle_time = max(0.0, student.arrival_minutes - self.available_time)
         service_begin = max(student.arrival_minutes, self.available_time)
+
+        if not is_open_at(service_begin):
+            student.status = "ditolak (tutup sebelum sempat dilayani)"
+            student.assigned_counselor = None
+            student.waiting_time = 0
+            student.service_time = 0
+            student.service_begin = student.arrival_minutes
+            student.service_end = student.arrival_minutes
+            student.counselor_idle_time = 0
+            return student
+
+        idle_time = max(0.0, student.arrival_minutes - self.available_time)
         waiting_time = service_begin - student.arrival_minutes
 
         student.update_stress_while_waiting(waiting_time)
@@ -959,13 +1014,30 @@ class CounselingEnvironment:
         """
         Menjalankan simulasi ABM berdasarkan interaksi agent.
         Setiap mahasiswa dilayani sesuai urutan kedatangan (FIFO).
+
+        Mahasiswa yang DATANG di luar jam operasional (08:00-21:00)
+        langsung DITOLAK -- tidak pernah masuk antrian konselor sama
+        sekali, persis seperti kantor yang pintunya memang sudah
+        terkunci saat mereka tiba.
         """
         self.create_student_agents()
 
         for student in self.student_agents:
+            if not is_open_at(student.arrival_minutes):
+                student.status = "ditolak (di luar jam operasional)"
+                student.assigned_counselor = None
+                student.waiting_time = 0
+                student.service_time = 0
+                student.service_begin = student.arrival_minutes
+                student.service_end = student.arrival_minutes
+                student.counselor_idle_time = 0
+                continue
+
             counselor = self.choose_counselor(student)
             counselor.serve_student(student)
-            student.receive_cbt(self.cbt_power)
+
+            if student.assigned_counselor is not None:
+                student.receive_cbt(self.cbt_power)
 
         return self.to_dataframe()
 
@@ -1689,14 +1761,21 @@ if run_trigger:
     )
 
     # Metrik
-    avg_waiting = round(result["Waiting Time"].mean(), 2)
-    avg_service = round(result["Service Time"].mean(), 2)
-    avg_idle = round(result["Counselor Idle Time"].mean(), 2)
-    probability_wait = round((result["Waiting Time"] > 0).mean(), 4)
-    avg_stress_before = round(result["Stress Before CBT"].mean(), 4)
-    avg_stress_after = round(result["Stress After CBT"].mean(), 4)
+    is_rejected = result["Agent Status"].str.startswith("ditolak")
+    n_rejected = int(is_rejected.sum())
+    n_served = n_students - n_rejected
+    pct_rejected = round(n_rejected / n_students, 4) if n_students else 0.0
+
+    served = result[~is_rejected]
+
+    avg_waiting = round(served["Waiting Time"].mean(), 2) if n_served > 0 else 0.0
+    avg_service = round(served["Service Time"].mean(), 2) if n_served > 0 else 0.0
+    avg_idle = round(served["Counselor Idle Time"].mean(), 2) if n_served > 0 else 0.0
+    probability_wait = round((served["Waiting Time"] > 0).mean(), 4) if n_served > 0 else 0.0
+    avg_stress_before = round(served["Stress Before CBT"].mean(), 4) if n_served > 0 else 0.0
+    avg_stress_after = round(served["Stress After CBT"].mean(), 4) if n_served > 0 else 0.0
     avg_stress_red = round(avg_stress_before - avg_stress_after, 4)
-    max_waiting = int(result["Waiting Time"].max())
+    max_waiting = int(served["Waiting Time"].max()) if n_served > 0 else 0
     avg_priority = round(result["Priority Score"].mean(), 4) if "Priority Score" in result else 0
     avg_tolerance = round(result["Wait Tolerance"].mean(), 2) if "Wait Tolerance" in result else 0
     mean_interarrival = float(dataset["Interarrival Time"].mean())
@@ -1704,6 +1783,9 @@ if run_trigger:
     summary_df = pd.DataFrame({
         "Indikator": [
             "Jumlah Mahasiswa",
+            "Jumlah Mahasiswa Dilayani",
+            "Jumlah Mahasiswa Ditolak (Jam Tutup)",
+            "Persentase Ditolak",
             "Jumlah Konselor",
             "Rata-rata Waktu Tunggu (menit)",
             "Waktu Tunggu Maksimum (menit)",
@@ -1720,6 +1802,9 @@ if run_trigger:
         ],
         "Nilai": [
             str(n_students),
+            str(n_served),
+            str(n_rejected),
+            f"{pct_rejected:.2%}",
             str(counselors),
             str(avg_waiting),
             str(max_waiting),
@@ -1787,6 +1872,9 @@ if run_trigger:
         "max_waiting": max_waiting,
         "avg_priority": avg_priority,
         "avg_tolerance": avg_tolerance,
+        "n_rejected": n_rejected,
+        "n_served": n_served,
+        "pct_rejected": pct_rejected,
     }
 
 # ══════════════════════════════════════════════
@@ -1819,6 +1907,9 @@ if st.session_state.sim_data is not None:
     max_waiting = sd["max_waiting"]
     avg_priority = sd["avg_priority"]
     avg_tolerance = sd["avg_tolerance"]
+    n_rejected = sd["n_rejected"]
+    n_served = sd["n_served"]
+    pct_rejected = sd["pct_rejected"]
 
     sec(2, "Indikator Kinerja Utama")
 
@@ -1831,10 +1922,19 @@ if st.session_state.sim_data is not None:
         + '</div>'
     )
 
+    row1b_html = (
+        '<div class="kpi-grid">'
+        + kpi("Mahasiswa Dilayani", n_served, f"dari {n_students:,} mahasiswa", "emerald", "✅")
+        + kpi("Mahasiswa Ditolak", n_rejected, "jam operasional tutup", "crimson", "🚫")
+        + kpi("Persentase Ditolak", f"{pct_rejected:.1%}", "dari total mahasiswa", "amber", "📉")
+        + kpi("Jam Operasional", "08:00-21:00", "13 jam/hari", "royal", "🕐")
+        + '</div>'
+    )
+
     row2_html = (
         '<div class="kpi-grid">'
-        + kpi("Stres Sebelum CBT", f"{avg_stress_before:.3f}", "rata-rata", "crimson", "😟")
-        + kpi("Stres Setelah CBT", f"{avg_stress_after:.3f}", "rata-rata", "emerald", "😌")
+        + kpi("Stres Sebelum CBT", f"{avg_stress_before:.3f}", "rata-rata (dilayani)", "crimson", "😟")
+        + kpi("Stres Setelah CBT", f"{avg_stress_after:.3f}", "rata-rata (dilayani)", "emerald", "😌")
         + kpi("Penurunan Stres", f"{avg_stress_red:.3f}", f"CBT {cbt_power}", "teal", "📉")
         + kpi("Jumlah Konselor Aktif", counselors, "agent konselor", "royal", "👨‍⚕️")
         + '</div>'
@@ -1849,7 +1949,7 @@ if st.session_state.sim_data is not None:
         + '</div>'
     )
 
-    st.markdown(row1_html + row2_html + row3_html, unsafe_allow_html=True)
+    st.markdown(row1_html + row1b_html + row2_html + row3_html, unsafe_allow_html=True)
 
     # Visualisasi
     sec(3, "Visualisasi Hasil Simulasi")
@@ -2074,19 +2174,31 @@ if st.session_state.sim_data is not None:
     # Rekomendasi
     sec(8, "Rekomendasi Sistem")
 
-    if avg_waiting > 20 or probability_wait > 0.60:
+    if pct_rejected > 0.15:
+        sc, ico, head = "warn", "🚫", "Banyak Mahasiswa Tidak Terlayani (Jam Tutup)"
+        body = (
+            f"Sebanyak <strong>{n_rejected} mahasiswa ({pct_rejected:.1%})</strong> tidak dapat dilayani "
+            f"karena datang atau baru mendapat giliran setelah jam operasional (21:00) berakhir. "
+            f"Dari mahasiswa yang berhasil dilayani, rata-rata waktu tunggu adalah "
+            f"<strong>{avg_waiting} menit</strong>. Disarankan menambah jumlah konselor menjadi "
+            f"<strong>{counselors + 1}</strong> dan/atau mempertimbangkan perpanjangan jam operasional "
+            f"agar lebih banyak mahasiswa yang berisiko tinggi tetap dapat memperoleh layanan."
+        )
+    elif avg_waiting > 20 or probability_wait > 0.60:
         sc, ico, head = "warn", "⚠️", "Sistem Antrian Padat"
         body = (
             f"Rata-rata waktu tunggu mencapai <strong>{avg_waiting} menit</strong> and "
-            f"<strong>{probability_wait:.1%}</strong> mahasiswa mengalami antrian. "
-            f"Berdasarkan hasil simulasi ABM, sistem disarankan menambah jumlah konselor menjadi "
+            f"<strong>{probability_wait:.1%}</strong> mahasiswa mengalami antrian"
+            + (f", dengan <strong>{n_rejected} mahasiswa ({pct_rejected:.1%})</strong> tidak terlayani akibat jam tutup. " if n_rejected > 0 else ". ")
+            + f"Berdasarkan hasil simulasi ABM, sistem disarankan menambah jumlah konselor menjadi "
             f"<strong>{counselors + 1}</strong> agar tekanan antrian berkurang."
         )
-    elif avg_waiting < 5 and probability_wait < 0.30:
+    elif avg_waiting < 5 and probability_wait < 0.30 and pct_rejected < 0.05:
         sc, ico, head = "ok", "✅", "Sistem Berjalan Efisien"
         body = (
             f"Sistem menunjukkan performa baik. Hanya <strong>{probability_wait:.1%}</strong> "
-            f"mahasiswa mengalami waktu tunggu dengan rata-rata <strong>{avg_waiting} menit</strong>. "
+            f"mahasiswa mengalami waktu tunggu dengan rata-rata <strong>{avg_waiting} menit</strong>, "
+            f"dan hampir seluruh mahasiswa ({n_served} dari {n_students}) berhasil dilayani dalam jam operasional. "
             f"Jumlah <strong>{counselors}</strong> konselor sudah cukup untuk kondisi simulasi ini."
         )
     else:
@@ -2094,7 +2206,9 @@ if st.session_state.sim_data is not None:
         body = (
             f"Sistem masih berada pada kondisi cukup stabil dengan rata-rata waktu tunggu "
             f"<strong>{avg_waiting} menit</strong> dan probabilitas menunggu "
-            f"<strong>{probability_wait:.1%}</strong>. Jumlah konselor saat ini masih dapat digunakan, "
+            f"<strong>{probability_wait:.1%}</strong>"
+            + (f", serta <strong>{n_rejected} mahasiswa ({pct_rejected:.1%})</strong> tidak terlayani akibat jam tutup. " if n_rejected > 0 else ". ")
+            + "Jumlah konselor saat ini masih dapat digunakan, "
             "tetapi perlu dipantau ketika jumlah mahasiswa meningkat."
         )
 
@@ -2109,10 +2223,12 @@ if st.session_state.sim_data is not None:
 
     with st.expander("Asumsi dan Keterbatasan Model"):
         st.markdown(f"""
+- **Jam operasional** layanan konseling adalah **08:00 - 21:00 (13 jam/hari)**. Mahasiswa yang datang di luar jam ini, atau yang giliran layanannya baru tiba setelah jam 21:00 karena antrian panjang, **ditolak/tidak dilayani** hari itu (status "ditolak (di luar jam operasional)" atau "ditolak (tutup sebelum sempat dilayani)") -- sesuai kondisi dunia nyata di mana kantor konseling tidak melayani di luar jam kerja. Sesi yang sudah berjalan sebelum jam 21:00 tetap dibiarkan selesai. Kolom Arrival Time/Service Begins/Ends memakai format kalender riil dan diberi label **"Hari 2"**, dst., jika kumulatif waktu kedatangan melewati tengah malam.
+- **Metrik rata-rata waktu tunggu, waktu layanan, dan penurunan stres** dihitung HANYA dari mahasiswa yang benar-benar dilayani (tidak termasuk yang ditolak), agar angkanya tidak bias oleh mahasiswa yang tidak sempat masuk antrian.
 - **Proses kedatangan** diasumsikan mengikuti distribusi eksponensial (proses Poisson) dengan rata-rata antar kedatangan {mean_interarrival:.1f} menit, sesuai asumsi standar model antrian M/M/c. Nilai Interarrival Time dibulatkan menjadi bilangan bulat (tanpa desimal) agar perhitungan manual lebih mudah.
 - **Antrian** dilayani murni berdasarkan urutan kedatangan (FIFO): mahasiswa diarahkan ke konselor yang paling cepat tersedia.
 - **Monte Carlo** untuk mahasiswa > 200 dibatasi menjadi {mc_n} agent per iterasi agar performa aplikasi tetap responsif; simulasi utama tetap memakai seluruh {n_students:,} mahasiswa.
-- **Validasi Erlang-C** merupakan pembanding teoritis pada kondisi steady-state dan mengasumsikan seluruh konselor identik (homogen) serta tidak ada mahasiswa yang batal antre — sementara ABM memodelkan fatigue konselor dan kemungkinan mahasiswa keluar dari antrian, sehingga selisih kecil dengan hasil ABM adalah wajar.
+- **Validasi Erlang-C** merupakan pembanding teoritis pada kondisi steady-state dan mengasumsikan seluruh konselor identik (homogen), layanan berjalan kontinu tanpa jam tutup, serta tidak ada mahasiswa yang batal antre — sementara ABM memodelkan jam operasional, fatigue konselor, dan kemungkinan mahasiswa keluar dari antrian, sehingga selisih kecil dengan hasil ABM adalah wajar.
 - **Pengembangan lanjutan yang mungkin:** pola kedatangan non-stasioner (jam sibuk mendekati UAS), antrian berbasis prioritas risiko, heterogenitas skill antar konselor, dan analisis periode warm-up untuk memisahkan kondisi transien di awal simulasi.
 """)
 

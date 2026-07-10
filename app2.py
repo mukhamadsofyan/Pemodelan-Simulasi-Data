@@ -8,29 +8,7 @@ Login demo:
 - Username: admin
 - Password: 123456
 
-CATATAN PERUBAHAN (agar perhitungan manual lebih mudah):
-- Kolom "Interarrival Time" dibulatkan menjadi BILANGAN BULAT (tanpa desimal/koma).
-- Kolom "Counselor Idle Time" dibulatkan menjadi BILANGAN BULAT (tanpa desimal/koma).
-- Kolom "Wait Tolerance" dibulatkan menjadi BILANGAN BULAT (tanpa desimal/koma).
 
-PATCH PERBAIKAN BUG (arrival rollover):
-- Sebelumnya, waktu kedatangan mahasiswa dijumlahkan kumulatif TANPA
-  memperhatikan jam operasional. Akibatnya, begitu total menit kumulatif
-  jatuh pada jam tutup (21:00-08:00), mahasiswa tsb OTOMATIS berstatus
-  "ditolak (di luar jam operasional)" -- padahal ini bukan karena
-  antrian padat, melainkan artefak cara waktu kedatangan dihitung
-  (kira-kira 11/24 = ~45.8% dari seluruh mahasiswa akan selalu jatuh
-  di jam tutup, berapa pun jumlah konselornya).
-- PERBAIKAN: waktu kedatangan yang jatuh di luar jam operasional kini
-  DIGESER MAJU ke jam buka berikutnya (08:00) -- merepresentasikan
-  kondisi realistis bahwa mahasiswa memang baru datang begitu kantor
-  buka, bukan "muncul" jam 2 pagi lalu ditolak.
-- Dengan perbaikan ini, status "ditolak (tutup sebelum sempat dilayani)"
-  jadi satu-satunya indikator penolakan yang tersisa, dan itu BENAR-BENAR
-  mencerminkan kemacetan antrian (giliran mahasiswa baru tiba setelah
-  jam tutup karena konselor masih sibuk melayani antrian sebelumnya).
-  Sehingga rekomendasi "tambah konselor" jadi sinyal yang valid, bukan
-  dipicu oleh bug penghitungan waktu kedatangan.
 """
 
 

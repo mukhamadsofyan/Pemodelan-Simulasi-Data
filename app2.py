@@ -2283,7 +2283,6 @@ if st.session_state.sim_data is not None:
 - **Antrian** dilayani murni berdasarkan urutan kedatangan (FIFO): mahasiswa diarahkan ke konselor yang paling cepat tersedia.
 - **Monte Carlo** untuk mahasiswa > 200 dibatasi menjadi {mc_n} agent per iterasi agar performa aplikasi tetap responsif; simulasi utama tetap memakai seluruh {n_students:,} mahasiswa.
 - **Validasi Erlang-C** merupakan pembanding teoritis pada kondisi steady-state dan mengasumsikan seluruh konselor identik (homogen), layanan berjalan kontinu tanpa jam tutup, serta tidak ada mahasiswa yang batal antre -- sementara ABM memodelkan jam operasional, fatigue konselor, dan kemungkinan mahasiswa keluar dari antrian, sehingga selisih kecil dengan hasil ABM adalah wajar.
-- **Pengembangan lanjutan yang mungkin:** pola kedatangan non-stasioner (jam sibuk mendekati UAS), antrian berbasis prioritas risiko, heterogenitas skill antar konselor, dan analisis periode warm-up untuk memisahkan kondisi transien di awal simulasi.
 """)
 
     st.markdown(

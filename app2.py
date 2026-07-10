@@ -12,6 +12,25 @@ CATATAN PERUBAHAN (agar perhitungan manual lebih mudah):
 - Kolom "Interarrival Time" dibulatkan menjadi BILANGAN BULAT (tanpa desimal/koma).
 - Kolom "Counselor Idle Time" dibulatkan menjadi BILANGAN BULAT (tanpa desimal/koma).
 - Kolom "Wait Tolerance" dibulatkan menjadi BILANGAN BULAT (tanpa desimal/koma).
+
+PATCH PERBAIKAN BUG (arrival rollover):
+- Sebelumnya, waktu kedatangan mahasiswa dijumlahkan kumulatif TANPA
+  memperhatikan jam operasional. Akibatnya, begitu total menit kumulatif
+  jatuh pada jam tutup (21:00-08:00), mahasiswa tsb OTOMATIS berstatus
+  "ditolak (di luar jam operasional)" -- padahal ini bukan karena
+  antrian padat, melainkan artefak cara waktu kedatangan dihitung
+  (kira-kira 11/24 = ~45.8% dari seluruh mahasiswa akan selalu jatuh
+  di jam tutup, berapa pun jumlah konselornya).
+- PERBAIKAN: waktu kedatangan yang jatuh di luar jam operasional kini
+  DIGESER MAJU ke jam buka berikutnya (08:00) -- merepresentasikan
+  kondisi realistis bahwa mahasiswa memang baru datang begitu kantor
+  buka, bukan "muncul" jam 2 pagi lalu ditolak.
+- Dengan perbaikan ini, status "ditolak (tutup sebelum sempat dilayani)"
+  jadi satu-satunya indikator penolakan yang tersisa, dan itu BENAR-BENAR
+  mencerminkan kemacetan antrian (giliran mahasiswa baru tiba setelah
+  jam tutup karena konselor masih sibuk melayani antrian sebelumnya).
+  Sehingga rekomendasi "tambah konselor" jadi sinyal yang valid, bukan
+  dipicu oleh bug penghitungan waktu kedatangan.
 """
 
 
@@ -714,12 +733,16 @@ START_TIME = datetime.strptime("08:00", "%H:%M")
 
 # ── Jam operasional layanan konseling ──
 # Layanan buka 08:00 dan tutup 21:00 setiap hari (13 jam operasional/hari).
-# Mahasiswa yang datang di luar jam ini, ATAU yang gilirannya baru tiba
-# setelah jam tutup karena antrian panjang, DITOLAK/tidak dilayani --
-# bukan otomatis dijadwalkan ulang. Ini sesuai logika dunia nyata: kalau
-# kantor sudah tutup, pintu ditutup, tidak ada yang menunggu di lorong
-# sampai besok. Sesi yang SUDAH BERJALAN sebelum jam tutup tetap
-# dibiarkan selesai (tidak dipotong di tengah sesi).
+# Mahasiswa yang gilirannya baru tiba setelah jam tutup karena antrian
+# panjang DITOLAK/tidak dilayani -- bukan otomatis dijadwalkan ulang.
+# Ini sesuai logika dunia nyata: kalau kantor sudah tutup, pintu ditutup,
+# tidak ada yang menunggu di lorong sampai besok. Sesi yang SUDAH BERJALAN
+# sebelum jam tutup tetap dibiarkan selesai (tidak dipotong di tengah sesi).
+#
+# CATATAN PATCH: waktu KEDATANGAN mahasiswa (arrival) itu sendiri kini
+# TIDAK PERNAH jatuh di luar jam operasional -- lihat
+# _roll_forward_to_open_time() dan create_student_agents() di bawah.
+# Penolakan yang tersisa murni berasal dari kemacetan antrian riil.
 OPEN_HOUR = 8
 CLOSE_HOUR = 21
 OPEN_MINUTE_OF_DAY = OPEN_HOUR * 60     # 480
@@ -729,9 +752,7 @@ def to_clock(minutes):
     """
     Mengonversi menit kumulatif (menit riil sejak simulasi dimulai)
     menjadi jam tampilan kalender asli. Jika sudah melewati hari
-    pertama, diberi label "Hari N" di depan jamnya. Waktu di luar jam
-    operasional (mis. 22:15) akan tetap tertampil apa adanya -- untuk
-    menunjukkan bahwa mahasiswa tersebut datang saat kantor tutup.
+    pertama, diberi label "Hari N" di depan jamnya.
     """
     total_minutes = int(round(minutes))
     dt = START_TIME + timedelta(minutes=total_minutes)
@@ -752,6 +773,44 @@ def is_open_at(minutes):
     dt = START_TIME + timedelta(minutes=total_minutes)
     minute_of_day = dt.hour * 60 + dt.minute
     return OPEN_MINUTE_OF_DAY <= minute_of_day < CLOSE_MINUTE_OF_DAY
+
+
+def _roll_forward_to_open_time(minutes):
+    """
+    *** PATCH BUG "ditolak di luar jam operasional" ***
+
+    Jika suatu titik waktu (menit kumulatif sejak simulasi dimulai)
+    jatuh di LUAR jam operasional (21:00-08:00), geser MAJU ke jam
+    buka (08:00) berikutnya.
+
+    Sebelum patch ini, waktu kedatangan mahasiswa dijumlahkan
+    kumulatif tanpa memperhatikan jam operasional sama sekali,
+    sehingga sekitar 11/24 (~45.8%) dari seluruh mahasiswa AKAN
+    SELALU jatuh di jam tutup dan otomatis ditolak -- berapa pun
+    jumlah konselor yang tersedia. Ini bukan mencerminkan kepadatan
+    sistem, melainkan artefak cara waktu kedatangan dihitung.
+
+    Dengan fungsi ini, mahasiswa yang "seharusnya" datang tengah
+    malam direpresentasikan sebagai mahasiswa yang baru datang
+    begitu kantor buka kembali (08:00) -- sesuai kondisi realistis.
+    Jika titik waktu SUDAH berada di jam operasional, dikembalikan
+    apa adanya (tidak digeser).
+    """
+    total_minutes = int(round(minutes))
+    dt = START_TIME + timedelta(minutes=total_minutes)
+    minute_of_day = dt.hour * 60 + dt.minute
+
+    if minute_of_day >= CLOSE_MINUTE_OF_DAY:
+        # Lewat jam tutup hari ini -> geser ke jam buka besok
+        next_open = dt.replace(hour=OPEN_HOUR, minute=0, second=0, microsecond=0) \
+                    + timedelta(days=1)
+    elif minute_of_day < OPEN_MINUTE_OF_DAY:
+        # Belum jam buka hari ini (mis. jatuh jam 03:00) -> geser ke jam buka hari ini
+        next_open = dt.replace(hour=OPEN_HOUR, minute=0, second=0, microsecond=0)
+    else:
+        return minutes  # sudah di jam operasional, tidak perlu digeser
+
+    return (next_open - START_TIME).total_seconds() / 60.0
 
 
 # ══════════════════════════════════════════════
@@ -835,12 +894,15 @@ class StudentAgent:
     def calculate_service_time(self, counselor_fatigue=0.0):
         """
         Waktu layanan dipengaruhi stres terkini, prioritas risiko,
-        dan fatigue konselor.
+        dan fatigue konselor -- kemudian DIBATASI (clamp) ke rentang
+        5-30 menit, supaya tidak ada sesi konseling yang lebih pendek
+        dari 5 menit atau lebih panjang dari 30 menit.
         """
-        base_time = 20 + (self.current_stress * 35)
+        base_time = 5 + (self.current_stress * 20)
         priority_adjustment = self.priority_score * 5
-        fatigue_adjustment = counselor_fatigue * 6
-        self.service_time = int(round(base_time + priority_adjustment + fatigue_adjustment))
+        fatigue_adjustment = counselor_fatigue * 5
+        raw_time = base_time + priority_adjustment + fatigue_adjustment
+        self.service_time = int(round(min(30, max(5, raw_time))))
         return self.service_time
 
     def receive_cbt(self, cbt_power):
@@ -983,6 +1045,13 @@ class CounselingEnvironment:
         mahasiswa tersebut tercatat datang jam 08:03 -- bukan 08:00.
         Mahasiswa kedua datang pada (arrival mahasiswa 1 + interarrival
         time mahasiswa 2), dan seterusnya secara kumulatif.
+
+        *** PATCH: setelah dijumlahkan kumulatif, waktu kedatangan
+        yang jatuh di luar jam operasional DIGESER ke jam buka
+        berikutnya (lihat _roll_forward_to_open_time()), sehingga
+        mahasiswa tidak lagi otomatis ditolak hanya karena
+        "kebetulan" jatuh di jam tutup. Penolakan yang tersisa
+        (di fungsi run()) murni mencerminkan kemacetan antrian riil.
         """
         arrival_minutes = 0.0
         agents = []
@@ -993,6 +1062,9 @@ class CounselingEnvironment:
             # Interarrival Time SETIAP baris, termasuk baris pertama,
             # selalu ditambahkan ke waktu kedatangan kumulatif.
             arrival_minutes += student.interarrival_time
+
+            # Geser ke jam buka berikutnya jika jatuh di luar jam operasional.
+            arrival_minutes = _roll_forward_to_open_time(arrival_minutes)
 
             student.arrival_minutes = arrival_minutes
             agents.append(student)
@@ -1015,10 +1087,14 @@ class CounselingEnvironment:
         Menjalankan simulasi ABM berdasarkan interaksi agent.
         Setiap mahasiswa dilayani sesuai urutan kedatangan (FIFO).
 
-        Mahasiswa yang DATANG di luar jam operasional (08:00-21:00)
-        langsung DITOLAK -- tidak pernah masuk antrian konselor sama
-        sekali, persis seperti kantor yang pintunya memang sudah
-        terkunci saat mereka tiba.
+        Cabang "ditolak (di luar jam operasional)" di bawah ini
+        dipertahankan sebagai JARING PENGAMAN saja -- setelah patch
+        pada create_student_agents(), waktu kedatangan seharusnya
+        tidak akan pernah lagi jatuh di luar jam operasional, sehingga
+        cabang ini secara praktis tidak akan tereksekusi. Penolakan
+        yang benar-benar terjadi (jika ada) akan datang dari
+        CounselorAgent.serve_student() saat giliran mahasiswa baru
+        tiba setelah jam tutup karena antrian masih panjang.
         """
         self.create_student_agents()
 
@@ -2160,8 +2236,8 @@ if st.session_state.sim_data is not None:
             f"Tingkat utilisasi sistem (ρ) = {rho_theory:.2f}. Selisih antara simulasi "
             "ABM dan model teoritis wajar terjadi karena model ABM memasukkan faktor "
             "tambahan yang tidak ada pada M/M/c murni, seperti fatigue konselor, "
-            "penyesuaian waktu layanan berbasis stres/prioritas, dan kemungkinan "
-            "mahasiswa batal antre."
+            "penyesuaian waktu layanan berbasis stres/prioritas, jam operasional "
+            "terbatas, dan kemungkinan mahasiswa batal antre."
         )
     else:
         st.warning(
@@ -2178,8 +2254,8 @@ if st.session_state.sim_data is not None:
         sc, ico, head = "warn", "🚫", "Banyak Mahasiswa Tidak Terlayani (Jam Tutup)"
         body = (
             f"Sebanyak <strong>{n_rejected} mahasiswa ({pct_rejected:.1%})</strong> tidak dapat dilayani "
-            f"karena datang atau baru mendapat giliran setelah jam operasional (21:00) berakhir. "
-            f"Dari mahasiswa yang berhasil dilayani, rata-rata waktu tunggu adalah "
+            f"karena giliran mereka baru tiba setelah jam operasional (21:00) berakhir akibat antrian "
+            f"yang masih panjang. Dari mahasiswa yang berhasil dilayani, rata-rata waktu tunggu adalah "
             f"<strong>{avg_waiting} menit</strong>. Disarankan menambah jumlah konselor menjadi "
             f"<strong>{counselors + 1}</strong> dan/atau mempertimbangkan perpanjangan jam operasional "
             f"agar lebih banyak mahasiswa yang berisiko tinggi tetap dapat memperoleh layanan."
@@ -2187,7 +2263,7 @@ if st.session_state.sim_data is not None:
     elif avg_waiting > 20 or probability_wait > 0.60:
         sc, ico, head = "warn", "⚠️", "Sistem Antrian Padat"
         body = (
-            f"Rata-rata waktu tunggu mencapai <strong>{avg_waiting} menit</strong> and "
+            f"Rata-rata waktu tunggu mencapai <strong>{avg_waiting} menit</strong> dan "
             f"<strong>{probability_wait:.1%}</strong> mahasiswa mengalami antrian"
             + (f", dengan <strong>{n_rejected} mahasiswa ({pct_rejected:.1%})</strong> tidak terlayani akibat jam tutup. " if n_rejected > 0 else ". ")
             + f"Berdasarkan hasil simulasi ABM, sistem disarankan menambah jumlah konselor menjadi "
@@ -2223,12 +2299,12 @@ if st.session_state.sim_data is not None:
 
     with st.expander("Asumsi dan Keterbatasan Model"):
         st.markdown(f"""
-- **Jam operasional** layanan konseling adalah **08:00 - 21:00 (13 jam/hari)**. Mahasiswa yang datang di luar jam ini, atau yang giliran layanannya baru tiba setelah jam 21:00 karena antrian panjang, **ditolak/tidak dilayani** hari itu (status "ditolak (di luar jam operasional)" atau "ditolak (tutup sebelum sempat dilayani)") -- sesuai kondisi dunia nyata di mana kantor konseling tidak melayani di luar jam kerja. Sesi yang sudah berjalan sebelum jam 21:00 tetap dibiarkan selesai. Kolom Arrival Time/Service Begins/Ends memakai format kalender riil dan diberi label **"Hari 2"**, dst., jika kumulatif waktu kedatangan melewati tengah malam.
+- **Jam operasional** layanan konseling adalah **08:00 - 21:00 (13 jam/hari)**. Waktu KEDATANGAN mahasiswa yang jatuh di luar jam ini otomatis **digeser ke jam buka berikutnya** (bukan ditolak) -- ini merepresentasikan kondisi realistis bahwa mahasiswa memang baru datang begitu kantor buka. Penolakan/tidak dilayani (status "ditolak (tutup sebelum sempat dilayani)") hanya terjadi jika **giliran** mahasiswa (setelah menunggu konselor tersedia) baru tiba setelah jam 21:00 karena antrian memang masih panjang -- ini murni mencerminkan kemacetan sistem, bukan artefak perhitungan waktu kedatangan. Sesi yang sudah berjalan sebelum jam 21:00 tetap dibiarkan selesai. Kolom Arrival Time/Service Begins/Ends memakai format kalender riil dan diberi label **"Hari 2"**, dst., jika kumulatif waktu kedatangan melewati tengah malam.
 - **Metrik rata-rata waktu tunggu, waktu layanan, dan penurunan stres** dihitung HANYA dari mahasiswa yang benar-benar dilayani (tidak termasuk yang ditolak), agar angkanya tidak bias oleh mahasiswa yang tidak sempat masuk antrian.
 - **Proses kedatangan** diasumsikan mengikuti distribusi eksponensial (proses Poisson) dengan rata-rata antar kedatangan {mean_interarrival:.1f} menit, sesuai asumsi standar model antrian M/M/c. Nilai Interarrival Time dibulatkan menjadi bilangan bulat (tanpa desimal) agar perhitungan manual lebih mudah.
 - **Antrian** dilayani murni berdasarkan urutan kedatangan (FIFO): mahasiswa diarahkan ke konselor yang paling cepat tersedia.
 - **Monte Carlo** untuk mahasiswa > 200 dibatasi menjadi {mc_n} agent per iterasi agar performa aplikasi tetap responsif; simulasi utama tetap memakai seluruh {n_students:,} mahasiswa.
-- **Validasi Erlang-C** merupakan pembanding teoritis pada kondisi steady-state dan mengasumsikan seluruh konselor identik (homogen), layanan berjalan kontinu tanpa jam tutup, serta tidak ada mahasiswa yang batal antre — sementara ABM memodelkan jam operasional, fatigue konselor, dan kemungkinan mahasiswa keluar dari antrian, sehingga selisih kecil dengan hasil ABM adalah wajar.
+- **Validasi Erlang-C** merupakan pembanding teoritis pada kondisi steady-state dan mengasumsikan seluruh konselor identik (homogen), layanan berjalan kontinu tanpa jam tutup, serta tidak ada mahasiswa yang batal antre -- sementara ABM memodelkan jam operasional, fatigue konselor, dan kemungkinan mahasiswa keluar dari antrian, sehingga selisih kecil dengan hasil ABM adalah wajar.
 - **Pengembangan lanjutan yang mungkin:** pola kedatangan non-stasioner (jam sibuk mendekati UAS), antrian berbasis prioritas risiko, heterogenitas skill antar konselor, dan analisis periode warm-up untuk memisahkan kondisi transien di awal simulasi.
 """)
 
@@ -2241,7 +2317,7 @@ if st.session_state.sim_data is not None:
     )
 
 # ══════════════════════════════════════════════
-# EMPTY STATE (Perbaikan teks fitur lama di sini)
+# EMPTY STATE
 # ══════════════════════════════════════════════
 
 else:
@@ -2282,4 +2358,3 @@ else:
             </div>
         </div>
     </div>""", unsafe_allow_html=True)
-    

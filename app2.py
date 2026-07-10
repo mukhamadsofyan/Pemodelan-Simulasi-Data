@@ -921,6 +921,13 @@ class CounselingEnvironment:
         """
         Membuat StudentAgent dari dataset dan menghitung arrival time
         berdasarkan interarrival time kumulatif (proses kedatangan).
+
+        PENTING: Interarrival Time pada baris pertama TETAP dihitung
+        (tidak diabaikan). Contoh: jika simulasi dimulai jam 08:00 dan
+        mahasiswa pertama memiliki Interarrival Time = 3 menit, maka
+        mahasiswa tersebut tercatat datang jam 08:03 -- bukan 08:00.
+        Mahasiswa kedua datang pada (arrival mahasiswa 1 + interarrival
+        time mahasiswa 2), dan seterusnya secara kumulatif.
         """
         arrival_minutes = 0.0
         agents = []
@@ -928,10 +935,9 @@ class CounselingEnvironment:
         for idx, row in self.dataset.iterrows():
             student = StudentAgent(row)
 
-            if idx == 0:
-                arrival_minutes = 0.0
-            else:
-                arrival_minutes += student.interarrival_time
+            # Interarrival Time SETIAP baris, termasuk baris pertama,
+            # selalu ditambahkan ke waktu kedatangan kumulatif.
+            arrival_minutes += student.interarrival_time
 
             student.arrival_minutes = arrival_minutes
             agents.append(student)
